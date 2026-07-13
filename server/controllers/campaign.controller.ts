@@ -4,360 +4,265 @@
  */
 
 import { Request, Response } from "express";
-import { dbService } from "../services/db.service";
-import { aiService } from "../services/ai.service";
-import { Campaign, CampaignStatus, Lead, LeadStatus } from "../../src/types";
+import {
+  campaignRepository,
+  leadRepository,
+  historyRepository,
+} from "../db/repositories";
+import { logAudit } from "../services/db.service";
+import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
+import { CampaignStatus, LeadStatus } from "../../src/types";
+import { AuthenticatedRequest } from "../middleware/auth.middleware";
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export class CampaignController {
-  public static getCampaigns(req: Request, res: Response) {
-    const dbState = dbService.getState();
-    const activeCampaigns = dbState.campaigns.filter(c => !c.deletedAt);
-    res.json({ success: true, data: activeCampaigns });
+  public static async getCampaigns(_req: Request, res: Response): Promise<void> {
+    const data = await campaignRepository.list();
+    res.json({ success: true, data });
   }
 
-  public static createCampaign(req: Request, res: Response) {
+  public static async createCampaign(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { name } = req.body;
-    const dbState = dbService.getState();
-
-    const exists = dbState.campaigns.some(c => c.name.toLowerCase() === name.toLowerCase() && !c.deletedAt);
-    if (exists) {
-      res.status(400).json({ success: false, error: "A campaign with this name already exists." });
+    if (typeof name !== "string" || name.trim() === "") {
+      res.status(400).json({ success: false, error: "Campaign name is required." });
       return;
     }
-
-    const newCampaign: Campaign = {
-      id: `camp-${Date.now()}`,
-      name,
-      status: CampaignStatus.DRAFT,
-      sentCount: 0,
-      openCount: 0,
-      replyCount: 0,
-      bounceCount: 0,
-      unsubCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      scheduleDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-      scheduleTimeStart: "09:00",
-      scheduleTimeEnd: "17:00",
-      timezone: "America/New_York",
+    const dupe = await campaignRepository.findByNameActive(name);
+    if (dupe) {
+      res.status(409).json({ success: false, error: "A campaign with this name already exists." });
+      return;
+    }
+    const campaign = await campaignRepository.create({
+      name: name.trim(),
       subjectTemplate: "Quick question regarding {{company}}'s growth engine",
-      bodyTemplate: "Hi {{firstName}},\n\nI was looking into {{company}}.\n\n{{personalizedLine}}\n\nWould you be open to a quick 10-minute chat?"
-    };
-
-    dbState.campaigns.push(newCampaign);
-    dbService.saveDb();
-    dbService.logAudit(`Campaign '${name}' created`, "CAMPAIGN", undefined, `ID: ${newCampaign.id}`);
-
-    res.status(201).json({ success: true, campaign: newCampaign });
+      bodyTemplate:
+        "Hi {{firstName}},\n\nI was looking into {{company}}.\n\n{{personalizedLine}}\n\nWould you be open to a quick 10-minute chat?",
+    });
+    await logAudit(`Campaign '${campaign.name}' created`, "CAMPAIGN", {
+      userId: req.user?.id,
+      userEmail: req.user?.email,
+      details: `ID: ${campaign.id}`,
+      ipAddress: req.ip,
+    });
+    res.status(201).json({ success: true, campaign });
   }
 
-  public static updateCampaign(req: Request, res: Response) {
+  public static async updateCampaign(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const dbState = dbService.getState();
-    const campaign = dbState.campaigns.find(c => c.id === id && !c.deletedAt);
+    const previous = await campaignRepository.findById(id);
+    if (!previous) {
+      res.status(404).json({ success: false, error: "Campaign not found." });
+      return;
+    }
+    const updated = await campaignRepository.update(id, req.body);
+    if (!updated) {
+      res.status(404).json({ success: false, error: "Campaign not found." });
+      return;
+    }
+    await historyRepository.log({
+      entityId: id,
+      entityType: "CAMPAIGN",
+      changedBy: req.user?.email || "system",
+      previousState: previous,
+      newState: updated,
+    });
+    await logAudit(`Campaign '${updated.name}' updated`, "CAMPAIGN", {
+      userId: req.user?.id,
+      userEmail: req.user?.email,
+      details: `Status: ${updated.status}`,
+      ipAddress: req.ip,
+    });
+    res.json({ success: true, campaign: updated });
+  }
+
+  public static async deleteCampaign(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const campaign = await campaignRepository.findById(id);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-
-    const previousState = { ...campaign };
-
-    // Update fields
-    const allowedFields = [
-      "name", "status", "scheduleDays", "scheduleTimeStart",
-      "scheduleTimeEnd", "timezone", "subjectTemplate", "bodyTemplate"
-    ];
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        (campaign as any)[field] = req.body[field];
-      }
-    }
-
-    campaign.updatedAt = new Date().toISOString();
-    dbService.saveDb();
-    dbService.logEntityHistory(id, "CAMPAIGN", "system", previousState, campaign);
-    dbService.logAudit(`Campaign '${campaign.name}' updated`, "CAMPAIGN", undefined, `Status: ${campaign.status}`);
-
-    res.json({ success: true, campaign });
+    await campaignRepository.softDelete(id);
+    await leadRepository.softDeleteByCampaign(id);
+    await logAudit(`Campaign '${campaign.name}' deleted`, "CAMPAIGN", {
+      userId: req.user?.id,
+      userEmail: req.user?.email,
+      details: `ID: ${id}`,
+      ipAddress: req.ip,
+    });
+    res.json({ success: true, message: "Campaign and associated leads deleted." });
   }
 
-  public static deleteCampaign(req: Request, res: Response) {
+  public static async getCampaignLeads(req: Request, res: Response): Promise<void> {
     const { id } = req.params;
-    const dbState = dbService.getState();
-    const campaign = dbState.campaigns.find(c => c.id === id && !c.deletedAt);
-    if (!campaign) {
-      res.status(404).json({ success: false, error: "Campaign not found." });
-      return;
-    }
-
-    campaign.deletedAt = new Date().toISOString();
-    
-    // Soft delete associated leads
-    for (const lead of dbState.leads) {
-      if (lead.campaignId === id) {
-        lead.deletedAt = new Date().toISOString();
-      }
-    }
-
-    dbService.saveDb();
-    dbService.logAudit(`Campaign '${campaign.name}' soft-deleted`, "CAMPAIGN", undefined, `ID: ${id}`);
-
-    res.json({ success: true, message: "Campaign and associated leads successfully deleted." });
+    const data = await leadRepository.listByCampaign(id);
+    res.json({ success: true, data });
   }
 
-  public static getCampaignLeads(req: Request, res: Response) {
-    const { id } = req.params;
-    const leads = dbService.findLeadsByCampaign(id);
-    res.json({ success: true, data: leads });
-  }
-
-  public static createCampaignLead(req: Request, res: Response) {
+  public static async createCampaignLead(req: Request, res: Response): Promise<void> {
     const campaignId = req.params.id;
     const { email, firstName, lastName, company, personalizedLine } = req.body;
-    const dbState = dbService.getState();
-
-    const campaign = dbState.campaigns.find(c => c.id === campaignId && !c.deletedAt);
-    if (!campaign) {
-      res.status(404).json({ success: false, error: "Campaign not found." });
-      return;
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!EMAIL_REGEX.test(email || "")) {
       res.status(400).json({ success: false, error: "Invalid email format." });
       return;
     }
-
-    const exists = dbState.leads.some(
-      l => l.campaignId === campaignId && l.email.toLowerCase() === email.toLowerCase() && !l.deletedAt
-    );
-    if (exists) {
-      res.status(400).json({ success: false, error: "A lead with this email already exists in this campaign." });
-      return;
-    }
-
-    const newLead: Lead = {
-      id: `lead-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      campaignId,
-      email,
-      firstName: firstName || "",
-      lastName: lastName || "",
-      company: company || "",
-      personalizedLine: personalizedLine || "",
-      status: LeadStatus.PENDING,
-      updatedAt: new Date().toISOString()
-    };
-
-    dbState.leads.push(newLead);
-    dbService.saveDb();
-    dbService.logAudit(`Added lead ${email} to campaign '${campaign.name}'`, "LEAD", undefined, `Lead ID: ${newLead.id}`);
-
-    res.status(201).json({ success: true, lead: newLead });
-  }
-
-  public static bulkCreateLeads(req: Request, res: Response) {
-    const campaignId = req.params.id;
-    const { leads } = req.body; // Array of leads
-    if (!Array.isArray(leads)) {
-      res.status(400).json({ success: false, error: "Required array of leads is missing." });
-      return;
-    }
-
-    const dbState = dbService.getState();
-    const campaign = dbState.campaigns.find(c => c.id === campaignId && !c.deletedAt);
+    const campaign = await campaignRepository.findById(campaignId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-
-    const addedLeads: Lead[] = [];
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-    for (const item of leads) {
-      const email = item.email;
-      if (!email || !emailRegex.test(email)) continue;
-
-      const isDup = dbState.leads.some(
-        l => l.campaignId === campaignId && l.email.toLowerCase() === email.toLowerCase() && !l.deletedAt
-      );
-      if (isDup) continue;
-
-      const newLead: Lead = {
-        id: `lead-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        campaignId,
-        email,
-        firstName: item.firstName || "",
-        lastName: item.lastName || "",
-        company: item.company || "",
-        personalizedLine: item.personalizedLine || "",
-        status: LeadStatus.PENDING,
-        updatedAt: new Date().toISOString()
-      };
-
-      dbState.leads.push(newLead);
-      addedLeads.push(newLead);
+    const dupe = await leadRepository.findByEmailInCampaign(campaignId, email);
+    if (dupe) {
+      res.status(409).json({ success: false, error: "Lead with this email is already in this campaign." });
+      return;
     }
-
-    dbService.saveDb();
-    dbService.logAudit(`Bulk imported ${addedLeads.length} leads to campaign '${campaign.name}'`, "LEAD", undefined, `Total Added: ${addedLeads.length}`);
-
-    res.json({ success: true, count: addedLeads.length, leads: addedLeads });
+    const lead = await leadRepository.create({
+      campaignId,
+      email,
+      firstName,
+      lastName,
+      company,
+      personalizedLine,
+    });
+    await logAudit(`Added lead ${email} to '${campaign.name}'`, "LEAD", { details: lead.id });
+    res.status(201).json({ success: true, lead });
   }
 
-  public static uploadLeadsCsv(req: Request, res: Response) {
+  public static async bulkCreateLeads(req: Request, res: Response): Promise<void> {
+    const campaignId = req.params.id;
+    const { leads } = req.body;
+    if (!Array.isArray(leads)) {
+      res.status(400).json({ success: false, error: "Field 'leads' must be an array." });
+      return;
+    }
+    const campaign = await campaignRepository.findById(campaignId);
+    if (!campaign) {
+      res.status(404).json({ success: false, error: "Campaign not found." });
+      return;
+    }
+    const valid = leads.filter((l) => l && EMAIL_REGEX.test(l.email || ""));
+    const created = await leadRepository.bulkCreate(
+      valid.map((l) => ({
+        campaignId,
+        email: l.email,
+        firstName: l.firstName || "",
+        lastName: l.lastName || "",
+        company: l.company || "",
+        personalizedLine: l.personalizedLine || "",
+      }))
+    );
+    await logAudit(`Bulk imported ${created.length} leads to '${campaign.name}'`, "LEAD");
+    res.json({ success: true, count: created.length, leads: created });
+  }
+
+  public static async uploadLeadsCsv(req: Request, res: Response): Promise<void> {
     const campaignId = req.params.id;
     const { csvText } = req.body;
-    if (!csvText) {
-      res.status(400).json({ success: false, error: "CSV data is missing or empty" });
+    if (typeof csvText !== "string" || csvText.trim() === "") {
+      res.status(400).json({ success: false, error: "CSV text is required." });
+      return;
+    }
+    const campaign = await campaignRepository.findById(campaignId);
+    if (!campaign) {
+      res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
 
     const lines = csvText.split(/\r?\n/).filter((l: string) => l.trim() !== "");
     if (lines.length === 0) {
-      res.status(400).json({ success: false, error: "Empty file template submitted" });
+      res.status(400).json({ success: false, error: "CSV file is empty." });
       return;
     }
-
     const headers = lines[0].split(",").map((h: string) => h.replace(/"/g, "").trim().toLowerCase());
     const emailIdx = headers.findIndex((h: string) => h.includes("email"));
-    const firstIdx = headers.findIndex((h: string) => h.includes("first") || h.includes("name"));
-    const lastIdx = headers.findIndex((h: string) => h.includes("last"));
+    const firstIdx = headers.findIndex((h: string) => h.includes("first") || h === "name");
+    const lastIdx  = headers.findIndex((h: string) => h.includes("last"));
     const companyIdx = headers.findIndex((h: string) => h.includes("company"));
-    const lineIdx = headers.findIndex((h: string) => h.includes("personal") || h.includes("line"));
+    const lineIdx  = headers.findIndex((h: string) => h.includes("personal") || h.includes("line"));
 
     if (emailIdx === -1) {
-      res.status(400).json({ success: false, error: "Missing required column 'email' in CSV header. Recognized headings are email, firstname, lastname, company" });
+      res.status(400).json({ success: false, error: "Missing 'email' column in CSV header." });
       return;
     }
 
-    const dbState = dbService.getState();
-    let successCount = 0;
-    let dupCount = 0;
-    let invalidCount = 0;
-    const addedLeads: Lead[] = [];
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
+    let successCount = 0, dupCount = 0, invalidCount = 0;
     for (let i = 1; i < lines.length; i++) {
       const cells = lines[i].split(",").map((c: string) => c.replace(/"/g, "").trim());
-      if (cells.length <= emailIdx) continue;
-
       const email = cells[emailIdx];
-      if (!email || !emailRegex.test(email)) {
-        invalidCount++;
-        continue;
-      }
-
-      const isDup = dbState.leads.some(
-        l => l.campaignId === campaignId && l.email.toLowerCase() === email.toLowerCase() && !l.deletedAt
-      );
-      if (isDup) {
-        dupCount++;
-        continue;
-      }
-
-      const lead: Lead = {
-        id: `lead-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      if (!email || !EMAIL_REGEX.test(email)) { invalidCount++; continue; }
+      const dupe = await leadRepository.findByEmailInCampaign(campaignId, email);
+      if (dupe) { dupCount++; continue; }
+      await leadRepository.create({
         campaignId,
         email,
-        firstName: firstIdx !== -1 && cells[firstIdx] ? cells[firstIdx] : "",
-        lastName: lastIdx !== -1 && cells[lastIdx] ? cells[lastIdx] : "",
-        company: companyIdx !== -1 && cells[companyIdx] ? cells[companyIdx] : "",
-        personalizedLine: lineIdx !== -1 && cells[lineIdx] ? cells[lineIdx] : "",
-        status: LeadStatus.PENDING,
-        updatedAt: new Date().toISOString()
-      };
-
-      dbState.leads.push(lead);
-      addedLeads.push(lead);
+        firstName: firstIdx !== -1 ? cells[firstIdx] : "",
+        lastName: lastIdx !== -1 ? cells[lastIdx] : "",
+        company: companyIdx !== -1 ? cells[companyIdx] : "",
+        personalizedLine: lineIdx !== -1 ? cells[lineIdx] : "",
+      });
       successCount++;
     }
-
-    dbService.saveDb();
-    dbService.logAudit(`CSV Uploaded ${addedLeads.length} leads to campaign ID ${campaignId}`, "LEAD", undefined, `Import success: ${successCount} | Dups: ${dupCount} | Invalid: ${invalidCount}`);
-
-    res.json({
-      success: true,
-      totalProcessed: lines.length - 1,
-      successCount,
-      dupCount,
-      invalidCount,
-      addedLeads
+    await logAudit(`CSV imported ${successCount} leads for '${campaign.name}'`, "LEAD", {
+      details: `success=${successCount} dup=${dupCount} invalid=${invalidCount}`,
     });
+    res.json({ success: true, totalProcessed: lines.length - 1, successCount, dupCount, invalidCount });
   }
 
-  public static async generateCampaignPitch(req: Request, res: Response) {
+  public static async generateCampaignPitch(req: Request, res: Response): Promise<void> {
     const { topic, valueProp } = req.body;
     if (!topic || !valueProp) {
-      res.status(400).json({ success: false, error: "Topic and Value Proposition are required." });
+      res.status(400).json({ success: false, error: "Topic and valueProp are required." });
       return;
     }
-
-    const pitch = await aiService.generateCampaignPitch(topic, valueProp);
-    res.json({ success: true, ...pitch });
+    try {
+      const pitch = await aiService.generateCampaignPitch(topic, valueProp);
+      res.json({ success: true, ...pitch });
+    } catch (err) {
+      if (err instanceof GeminiNotConfiguredError) {
+        res.status(503).json({ success: false, error: err.message });
+        return;
+      }
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
   }
 
-  public static async bulkPersonalize(req: Request, res: Response) {
+  public static async bulkPersonalize(req: Request, res: Response): Promise<void> {
     const { id } = req.params;
     const { customizationInstruction } = req.body;
-
-    const dbState = dbService.getState();
-    const campaign = dbState.campaigns.find(c => c.id === id && !c.deletedAt);
+    const campaign = await campaignRepository.findById(id);
     if (!campaign) {
-      res.status(404).json({ error: "Campaign not found" });
+      res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-
-    const campaignLeads = dbState.leads.filter(l => l.campaignId === id && !l.personalizedLine && !l.deletedAt);
-    if (campaignLeads.length === 0) {
-      res.json({ message: "No unpersonalized pending leads remaining in this campaign.", count: 0 });
+    const batch = await leadRepository.listPendingWithoutPersonalization(id, 10);
+    if (batch.length === 0) {
+      res.json({ success: true, message: "No unpersonalized pending leads remaining.", count: 0 });
       return;
     }
-
-    // Limit to 10 in parallel to prevent timing out sandbox Express requests
-    const batchToPersonalize = campaignLeads.slice(0, 10);
-
-    const promises = batchToPersonalize.map(async (lead) => {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (apiKey && apiKey !== "dummy-key" && apiKey.trim() !== "") {
+    if (!aiService.isConfigured()) {
+      res.status(503).json({ success: false, error: "Gemini not configured. Set GEMINI_API_KEY." });
+      return;
+    }
+    const results = await Promise.all(
+      batch.map(async (lead) => {
         try {
-          const prompt = `
-            Draft a single, highly tailored and organic first line of a cold email.
-            Context:
-            - Lead's name: ${lead.firstName} ${lead.lastName}
-            - Lead's company: ${lead.company}
-            - Personalization style guide: ${customizationInstruction || "Compliment their company position or a major product accomplishment."}
-            
-            Rules:
-            - Must be 1 natural sentence, starting with lowercase or capitalized appropriately.
-            - Must sound like a human researched their profile for 10 minutes.
-            - Avoid generic fluff like "I hope this email finds you well" or "Congrats on the success".
-            - Limit output to 18 words maximum.
-          `;
-          
-          const aiClient = new (await import("@google/genai")).GoogleGenAI({ apiKey });
-          const response = await aiClient.models.generateContent({
-            model: "gemini-3.5-flash",
-            contents: prompt,
-          });
-          lead.personalizedLine = (response.text || "").replace(/"/g, "").trim();
+          const line = await aiService.personalizeLine(lead, customizationInstruction || "");
+          await leadRepository.update(lead.id, { personalizedLine: line });
+          return { email: lead.email, line };
         } catch (err) {
-          lead.personalizedLine = `Impressive expansion of the tech footprint at ${lead.company}.`;
+          return { email: lead.email, line: "", error: (err as Error).message };
         }
-      } else {
-        lead.personalizedLine = `Impressive expansion of the tech footprint at ${lead.company}.`;
-      }
-      lead.updatedAt = new Date().toISOString();
+      })
+    );
+    await logAudit(`AI batch personalize on '${campaign.name}'`, "CAMPAIGN", {
+      details: `Personalized ${results.length} leads.`,
     });
-
-    await Promise.all(promises);
-    dbService.saveDb();
-    dbService.logAudit(`AI Batch Personalize run successfully for campaign ${campaign.name}`, "CAMPAIGN", undefined, `Personalized ${batchToPersonalize.length} leads.`);
-
     res.json({
       success: true,
-      message: `Successfully generated organic personalizations for ${batchToPersonalize.length} leads in campaign.`,
-      count: batchToPersonalize.length,
-      samplePersonalizations: batchToPersonalize.map(l => ({ email: l.email, line: l.personalizedLine }))
+      message: `Personalized ${results.filter((r) => r.line).length} of ${results.length} leads.`,
+      count: results.filter((r) => r.line).length,
+      samplePersonalizations: results,
     });
   }
 }

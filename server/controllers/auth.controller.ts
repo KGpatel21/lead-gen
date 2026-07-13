@@ -3,163 +3,155 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Request, Response } from "express";
 import crypto from "crypto";
-import { dbService, DbUser } from "../services/db.service";
+import { Request, Response } from "express";
+import { userRepository, teamRepository } from "../db/repositories";
 import { SecurityService } from "../services/security.service";
-import { SecurityRole, TeamMember } from "../../src/types";
+import { logAudit } from "../services/db.service";
+import { SecurityRole } from "../../src/types";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD_LEN = 8;
+
 export class AuthController {
-  public static register(req: Request, res: Response) {
+  public static async register(req: Request, res: Response): Promise<void> {
     const { name, email, password } = req.body;
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (typeof name !== "string" || name.trim().length < 2) {
+      res.status(400).json({ success: false, error: "Name is required." });
+      return;
+    }
+    if (!EMAIL_REGEX.test(email || "")) {
       res.status(400).json({ success: false, error: "Invalid email format." });
       return;
     }
-
-    const dbState = dbService.getState();
-    const exists = dbState.users.some(u => u.email.toLowerCase() === email.toLowerCase());
-    if (exists) {
-      res.status(400).json({ success: false, error: "User with this email already registered." });
+    if (typeof password !== "string" || password.length < MIN_PASSWORD_LEN) {
+      res.status(400).json({ success: false, error: `Password must be at least ${MIN_PASSWORD_LEN} characters.` });
       return;
     }
 
-    const salt = crypto.randomBytes(16).toString("hex");
-    const passwordHash = SecurityService.hashPassword(password, salt);
-    
-    // Assign ADMIN role if it's the first user, else standard USER role
-    const assignedRole = dbState.users.length === 0 ? SecurityRole.ADMIN : SecurityRole.USER;
-
-    const newUser: DbUser = {
-      id: `usr-${Date.now()}`,
-      name,
-      email,
-      role: assignedRole,
-      passwordHash,
-      passwordSalt: salt,
-      createdAt: new Date().toISOString()
-    };
-
-    dbState.users.push(newUser);
-
-    // Sync user into seed team members collection
-    const teamExists = dbState.teamMembers.some(t => t.email.toLowerCase() === email.toLowerCase());
-    if (!teamExists) {
-      const newMember: TeamMember = {
-        id: `team-${Date.now()}`,
-        name,
-        email,
-        role: assignedRole,
-        status: "ACTIVE",
-        joinedAt: new Date().toISOString()
-      };
-      dbState.teamMembers.push(newMember);
+    const existing = await userRepository.findByEmail(email);
+    if (existing) {
+      res.status(409).json({ success: false, error: "An account with this email already exists." });
+      return;
     }
 
-    dbService.saveDb();
-    dbService.logAudit(`Account registration success for ${email}`, "AUTHENTICATION", newUser.id, `Name: ${name} | Assigned Role: ${assignedRole}`, email);
+    // First registered user gets ADMIN. Everyone else is USER by default.
+    const userCount = await userRepository.count();
+    const role = userCount === 0 ? SecurityRole.ADMIN : SecurityRole.USER;
 
-    const token = SecurityService.generateJwt({ id: newUser.id, email: newUser.email, role: newUser.role });
+    const salt = SecurityService.newSalt();
+    const passwordHash = SecurityService.hashPassword(password, salt);
+    const newUser = await userRepository.create({
+      name: name.trim(),
+      email: email.trim(),
+      role,
+      passwordHash,
+      passwordSalt: salt,
+    });
 
+    // Mirror into team_members for the roster (best-effort; ignore dupe).
+    try {
+      await teamRepository.create({ name: newUser.name, email: newUser.email, role, status: "ACTIVE" });
+    } catch {
+      /* team member with email already exists */
+    }
+
+    await logAudit(`Account registered: ${newUser.email}`, "AUTHENTICATION", {
+      userId: newUser.id,
+      userEmail: newUser.email,
+      details: `Assigned role: ${role}`,
+      ipAddress: req.ip,
+    });
+
+    const token = SecurityService.generateJwt({ id: newUser.id, email: newUser.email, role });
     res.status(201).json({
       success: true,
       token,
-      user: { id: newUser.id, name: newUser.name, email: newUser.email, role: newUser.role }
+      user: { id: newUser.id, name: newUser.name, email: newUser.email, role },
     });
   }
 
-  public static login(req: Request, res: Response) {
+  public static async login(req: Request, res: Response): Promise<void> {
     const { email, password } = req.body;
-    const dbState = dbService.getState();
-    const user = dbState.users.find(u => u.email.toLowerCase() === email.toLowerCase() && !u.deletedAt);
-    if (!user) {
-      res.status(401).json({ success: false, error: "Authentication failed: Invalid credentials." });
+    if (!EMAIL_REGEX.test(email || "") || typeof password !== "string" || password.length === 0) {
+      res.status(400).json({ success: false, error: "Email and password are required." });
       return;
     }
-
+    const user = await userRepository.findByEmail(email);
+    if (!user) {
+      res.status(401).json({ success: false, error: "Invalid credentials." });
+      return;
+    }
     const hash = SecurityService.hashPassword(password, user.passwordSalt);
     if (hash !== user.passwordHash) {
-      res.status(401).json({ success: false, error: "Authentication failed: Invalid credentials." });
+      res.status(401).json({ success: false, error: "Invalid credentials." });
       return;
     }
 
     const token = SecurityService.generateJwt({ id: user.id, email: user.email, role: user.role });
-
-    dbService.saveDb();
-    dbService.logAudit(`User login session authenticated`, "AUTHENTICATION", user.id, undefined, user.email);
+    await logAudit("User login", "AUTHENTICATION", {
+      userId: user.id,
+      userEmail: user.email,
+      ipAddress: req.ip,
+    });
 
     res.json({
       success: true,
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role }
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
     });
   }
 
-  public static getMe(req: AuthenticatedRequest, res: Response) {
+  public static async getMe(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (!req.user) {
-      res.status(401).json({ success: false, error: "Unauthorized session context." });
+      res.status(401).json({ success: false, error: "Unauthorized." });
       return;
     }
-
-    const dbState = dbService.getState();
-    const user = dbState.users.find(u => u.id === req.user?.id);
-    if (!user) {
-      res.status(404).json({ success: false, error: "Authenticated profile record missing." });
+    const user = await userRepository.findById(req.user.id);
+    if (!user || user.deletedAt) {
+      res.status(404).json({ success: false, error: "User no longer exists." });
       return;
     }
-
     res.json({
       success: true,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role }
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
     });
   }
 
-  public static getTeam(req: Request, res: Response) {
-    const dbState = dbService.getState();
-    const activeTeam = dbState.teamMembers.filter(t => !t.deletedAt);
-    res.json({ success: true, data: activeTeam });
+  public static async getTeam(_req: Request, res: Response): Promise<void> {
+    const list = await teamRepository.list();
+    res.json({ success: true, data: list });
   }
 
-  public static inviteTeamMember(req: Request, res: Response) {
+  public static async inviteTeamMember(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { name, email, role } = req.body;
-    const dbState = dbService.getState();
-
-    const exists = dbState.teamMembers.some(t => t.email.toLowerCase() === email.toLowerCase() && !t.deletedAt);
-    if (exists) {
-      res.status(400).json({ success: false, error: "Team member with this email already active." });
+    if (!EMAIL_REGEX.test(email || "")) {
+      res.status(400).json({ success: false, error: "Invalid email." });
       return;
     }
-
-    const newMember: TeamMember = {
-      id: `team-${Date.now()}`,
-      name,
+    const existing = await teamRepository.findByEmail(email);
+    if (existing) {
+      res.status(409).json({ success: false, error: "Team member with that email already exists." });
+      return;
+    }
+    const inviteToken = crypto.randomBytes(24).toString("base64url");
+    const invitedRole: SecurityRole = role && Object.values(SecurityRole).includes(role) ? role : SecurityRole.USER;
+    const member = await teamRepository.create({
+      name: name || email.split("@")[0],
       email,
-      role: role || SecurityRole.USER,
+      role: invitedRole,
       status: "INVITED",
-      joinedAt: new Date().toISOString()
-    };
-
-    dbState.teamMembers.push(newMember);
-
-    // Bootstrap placeholder user credentials
-    const salt = crypto.randomBytes(16).toString("hex");
-    const passwordHash = SecurityService.hashPassword("OutboundSecret123!", salt);
-    const newUser: DbUser = {
-      id: `usr-${Date.now()}`,
-      name,
-      email,
-      role: role || SecurityRole.USER,
-      passwordHash,
-      passwordSalt: salt,
-      createdAt: new Date().toISOString()
-    };
-    dbState.users.push(newUser);
-
-    dbService.saveDb();
-    dbService.logAudit(`New team member invitation sent`, "SECURITY", undefined, `Invited: ${email} with role: ${role || SecurityRole.USER}`);
-
-    res.json({ success: true, member: newMember });
+      inviteToken,
+    });
+    await logAudit(`Team invite created for ${email}`, "SECURITY", {
+      userId: req.user?.id,
+      userEmail: req.user?.email,
+      details: `Invited role: ${invitedRole}`,
+      ipAddress: req.ip,
+    });
+    // We return the invite token to the caller so the frontend can render the
+    // acceptance link. In Phase 3 we swap this for an emailed invite.
+    res.status(201).json({ success: true, member, inviteToken });
   }
 }

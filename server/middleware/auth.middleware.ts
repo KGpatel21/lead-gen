@@ -1,67 +1,47 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * JWT Bearer authentication.
+ *
+ * Previously this middleware had a silent fallback: if no valid token was
+ * present, it logged the caller in as the first admin (or a hardcoded default).
+ * That made every "protected" endpoint public. That fallback is deleted.
+ * Missing or invalid tokens now return HTTP 401.
  */
 
 import { Request, Response, NextFunction } from "express";
 import { SecurityService } from "../services/security.service";
 import { SecurityRole } from "../../src/types";
-import { dbService } from "../services/db.service";
 
 export interface AuthenticatedRequest extends Request {
-  user?: {
-    id: string;
-    email: string;
-    role: SecurityRole;
-  };
+  user?: { id: string; email: string; role: SecurityRole };
 }
 
-/**
- * Validates and decodes signed Bearer JSON Web Tokens (JWT).
- * Gracefully falls back to a default administrator in development/preview to prevent blocking.
- */
-export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  let decoded: any = null;
-
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    const token = authHeader.split(" ")[1];
-    decoded = SecurityService.verifyJwt(token);
+export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    res.status(401).json({ success: false, error: "Missing bearer token." });
+    return;
   }
-
-  if (!decoded) {
-    const dbState = dbService.getState();
-    const dbAdmin = dbState.users.find(u => u.role === SecurityRole.ADMIN && !u.deletedAt) || dbState.users[0];
-    if (dbAdmin) {
-      decoded = {
-        id: dbAdmin.id,
-        email: dbAdmin.email,
-        role: dbAdmin.role
-      };
-    } else {
-      decoded = {
-        id: "usr-default-admin",
-        email: "krutarth123456798@gmail.com",
-        role: SecurityRole.ADMIN
-      };
-    }
+  const token = header.slice(7).trim();
+  const decoded = SecurityService.verifyJwt<{ id: string; email: string; role: SecurityRole }>(token);
+  if (!decoded || !decoded.id || !decoded.email || !decoded.role) {
+    res.status(401).json({ success: false, error: "Invalid or expired session token." });
+    return;
   }
-
-  req.user = decoded;
+  req.user = { id: decoded.id, email: decoded.email, role: decoded.role };
   next();
 }
 
-/**
- * Restricts route execution to specific roles (RBAC authorization).
- */
-export function requireRole(allowedRoles: SecurityRole[]) {
-  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+export function requireRole(allowed: SecurityRole[]) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
-      res.status(401).json({ success: false, error: "Access Denied: Session authentication required." });
+      res.status(401).json({ success: false, error: "Authentication required." });
       return;
     }
-    if (!allowedRoles.includes(req.user.role)) {
-      res.status(403).json({ success: false, error: "Access Denied: Insufficient administrative privileges." });
+    if (!allowed.includes(req.user.role)) {
+      res.status(403).json({ success: false, error: "Insufficient privileges." });
       return;
     }
     next();

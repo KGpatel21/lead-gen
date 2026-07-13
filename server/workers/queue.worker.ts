@@ -1,254 +1,196 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Persistent background email dispatcher.
+ *
+ * NOTE: This is still a setInterval scheduler that reads from the `queue`
+ * Postgres table. BullMQ+Redis is Phase 2 — it will replace this loop with
+ * proper distributed queue semantics (per-tenant, retry-with-backoff,
+ * dead-letter, priority tiers). This version already does:
+ *   - persistent queue in Postgres (crash-safe)
+ *   - per-SMTP account daily-limit + Redis-backed rate limiting
+ *   - retry with linear backoff up to 3 attempts
  */
 
-import crypto from "crypto";
-import { dbService, QueueItem } from "../services/db.service";
-import { aiService } from "../services/ai.service";
+import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
 import { smtpService } from "../services/smtp.service";
+import { redisService } from "../services/redis.service";
 import {
-  CampaignStatus,
-  LeadStatus,
-  Reply,
-  ReplySentiment,
-  AgentTaskLog,
-  Lead,
-  Campaign
-} from "../../src/types";
+  campaignRepository,
+  leadRepository,
+  smtpRepository,
+  queueRepository,
+  agentRepository,
+} from "../db/repositories";
+import { CampaignStatus, LeadStatus, SmtpAccount } from "../../src/types";
 
-// Static timestamp registries for rolling limit tracking
-const smtpSentTimestamps: Record<string, number[]> = {};
-const smtpLastSendTime: Record<string, number> = {};
+const SWEEP_INTERVAL_MS = 10_000;
+const PER_LEAD_SPACING_SECONDS = 30;
+const MIN_INTER_SEND_MS = 20_000;
+const RATE_LIMIT_WINDOW_SEC = 3600;
+const MAX_ATTEMPTS = 3;
 
 export class QueueWorker {
   public static lastSweepTime: string = new Date().toISOString();
 
-  /**
-   * Evaluates campaign schedules and calculates the next valid send window.
-   */
-  private static getNextValidScheduledTime(campaign: Campaign): Date {
-    const now = new Date();
-    // Default to offset 20 seconds from now in production
-    const target = new Date(now.getTime() + 20000);
-    return target;
-  }
-
-  /**
-   * Executes a single processing sweep of the campaign queues and dispatch schedules.
-   */
-  public static async runWorkerStep() {
+  public static async runWorkerStep(): Promise<void> {
     QueueWorker.lastSweepTime = new Date().toISOString();
-    const now = new Date();
-    const dbState = dbService.getState();
 
-    // --- STEP A: GENERATE QUEUE ITEMS FOR ACTIVE RUNNING CAMPAIGNS ---
-    const runningCampaigns = dbState.campaigns.filter(
-      c => c.status === CampaignStatus.RUNNING && !c.deletedAt
-    );
-
-    for (const campaign of runningCampaigns) {
-      const pendingLeads = dbState.leads.filter(
-        l => l.campaignId === campaign.id && l.status === LeadStatus.PENDING && !l.deletedAt
-      );
-
-      if (pendingLeads.length === 0) {
-        campaign.status = CampaignStatus.COMPLETED;
-        campaign.updatedAt = new Date().toISOString();
-        dbService.saveDb();
+    // Step A: enqueue outbound sends for RUNNING campaigns
+    const running = await campaignRepository.listRunning();
+    for (const campaign of running) {
+      const pending = await leadRepository.listPendingByCampaign(campaign.id);
+      if (pending.length === 0) {
+        // Mark campaign completed if there are no pending leads AND no active queue items
+        const anyQueue = await queueRepository.listPage(
+          { campaignId: campaign.id, status: "QUEUED" },
+          1,
+          1
+        );
+        if (anyQueue.total === 0) {
+          await campaignRepository.setStatus(campaign.id, CampaignStatus.COMPLETED);
+        }
         continue;
       }
 
-      const campaignFutureItems = dbState.queue.filter(
-        q => q.campaignId === campaign.id && q.status === "QUEUED"
-      );
-      let latestScheduledTime = this.getNextValidScheduledTime(campaign).getTime();
+      let idx = 0;
+      const baseTime = Date.now();
+      for (const lead of pending) {
+        const existing = await queueRepository.findByLead(lead.id);
+        if (existing) continue;
 
-      if (campaignFutureItems.length > 0) {
-        const maxScheduled = Math.max(...campaignFutureItems.map(q => new Date(q.scheduledAt).getTime()));
-        if (maxScheduled > latestScheduledTime) {
-          latestScheduledTime = maxScheduled;
+        let subject = "";
+        let body = "";
+        try {
+          const composed = await aiService.composeInitialEmail(lead.id, campaign.id);
+          subject = composed.subject;
+          body = composed.body;
+        } catch (err) {
+          if (err instanceof GeminiNotConfiguredError) {
+            // No AI — fall back to raw template substitution (composeInitialEmail
+            // itself already does this without calling the model).
+            subject = campaign.subjectTemplate;
+            body = campaign.bodyTemplate;
+          } else {
+            console.warn("[worker] compose failed for lead", lead.id, (err as Error).message);
+            continue;
+          }
         }
-      }
 
-      let itemIndex = 0;
-      for (const lead of pendingLeads) {
-        const existingQueueItem = dbState.queue.find(q => q.leadId === lead.id);
-        if (existingQueueItem) continue;
-
-        // Perform lead enrichment & research & generation
-        const { subject, body } = await aiService.researchLeadAndGenerateEmail(lead.id, campaign.id);
-
-        const spacingSeconds = 30; // 30 seconds deterministic spacing in production to avoid rate limits
-        const scheduledTime = new Date(latestScheduledTime + (itemIndex + 1) * spacingSeconds * 1000);
-
-        const newQueueItem: QueueItem = {
-          id: `queue-${Date.now()}-${crypto.randomUUID().split("-")[0]}`,
+        const scheduledAt = new Date(baseTime + (idx + 1) * PER_LEAD_SPACING_SECONDS * 1000);
+        await queueRepository.create({
           campaignId: campaign.id,
           leadId: lead.id,
           to: lead.email,
           subject,
           body,
-          scheduledAt: scheduledTime.toISOString(),
-          status: "QUEUED",
-          attempts: 0,
-          priority: 2
-        };
-
-        dbState.queue.push(newQueueItem);
-        dbService.saveDb();
-        itemIndex++;
+          scheduledAt,
+        });
+        idx++;
       }
     }
 
-    // --- STEP B: DISPATCH QUEUED EMAILS THAT ARE READY TO SEND ---
-    const eligibleQueueItems = dbState.queue.filter(q => {
-      const isReadyState = (q.status === "QUEUED" || q.status === "FAILED") && q.attempts < 3;
-      if (!isReadyState) return false;
+    // Step B: dispatch eligible items
+    const eligible = await queueRepository.pickEligibleForDispatch(50);
+    if (eligible.length === 0) return;
 
-      const scheduledDate = new Date(q.scheduledAt);
-      if (scheduledDate > now) return false;
+    // Pull all healthy SMTP accounts once per sweep
+    const healthy = await smtpRepository.listHealthy();
+    if (healthy.length === 0) {
+      console.warn("[worker] no healthy SMTP accounts available; sweep aborted");
+      return;
+    }
 
-      const campaign = dbState.campaigns.find(c => c.id === q.campaignId && !c.deletedAt);
-      return campaign && campaign.status === CampaignStatus.RUNNING;
-    });
-
-    if (eligibleQueueItems.length === 0) return;
-
-    // Sort by priority ascending, then scheduledAt ascending
-    eligibleQueueItems.sort((a, b) => {
-      const priorityA = a.priority ?? 2;
-      const priorityB = b.priority ?? 2;
-      if (priorityA !== priorityB) {
-        return priorityA - priorityB;
+    for (const item of eligible) {
+      const smtp = await this.pickAvailableSmtp(healthy);
+      if (!smtp) {
+        // Nothing under quota; retry next sweep.
+        break;
       }
-      return new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime();
-    });
 
-    for (const item of eligibleQueueItems) {
-      const lead = dbState.leads.find(l => l.id === item.leadId);
-      const campaign = dbState.campaigns.find(c => c.id === item.campaignId);
+      const lead = await leadRepository.findById(item.leadId);
+      const campaign = await campaignRepository.findById(item.campaignId);
       if (!lead || !campaign) {
-        item.status = "FAILED";
-        item.errorMessage = "Associated lead or campaign missing";
-        dbService.saveDb();
+        await queueRepository.markFailedOrRetry(item.id, "Lead or campaign missing", new Date(Date.now() + 60_000));
         continue;
       }
 
-      const rotatingSmtps = dbState.smtpAccounts.filter(s => {
-        if (s.deletedAt) return false;
-        const dailyLimit = s.warmupEnabled ? s.warmupDailyLimit : s.dailyLimit;
-        const sentCount = s.warmupEnabled ? s.warmupSentToday : s.sentToday;
-
-        const nowMs = Date.now();
-        const sentTimestamps = smtpSentTimestamps[s.id] || [];
-        const oneHourAgo = nowMs - 3600000;
-        const cleanTimestamps = sentTimestamps.filter(t => t > oneHourAgo);
-        smtpSentTimestamps[s.id] = cleanTimestamps;
-
-        const hourlyLimit = Math.ceil(dailyLimit / 5) || 10;
-        const sentThisHour = cleanTimestamps.length;
-
-        return sentCount < dailyLimit && sentThisHour < hourlyLimit && s.reputationScore > 50;
-      });
-
-      if (rotatingSmtps.length === 0) {
-        console.warn("[QUEUE] Throttled: No healthy SMTP accounts available with daily/hourly quota left.");
-        break;
-      }
-
-      let senderSmtp = rotatingSmtps[0];
-      const nowMs = Date.now();
-      const availableSmtp = rotatingSmtps.find(s => {
-        const lastSend = smtpLastSendTime[s.id] || 0;
-        return nowMs - lastSend >= 20000; // 20 seconds gap minimum
-      });
-
-      if (!availableSmtp) {
-        console.log("[QUEUE] All active SMTP accounts in cooldown. Waiting for next rate limit slot...");
-        break;
-      }
-
-      senderSmtp = availableSmtp;
-      smtpLastSendTime[senderSmtp.id] = nowMs;
-
-      item.status = "PENDING";
-      item.lastAttempt = new Date().toISOString();
-      dbService.saveDb();
+      await queueRepository.markPending(item.id, smtp.id);
 
       try {
-        const isRealSend = !!senderSmtp.smtpPassword;
-        if (isRealSend) {
-          await smtpService.sendRealSmtpEmail(senderSmtp, item.to, item.subject, item.body);
-        }
-
-        item.status = "SENT";
-        lead.status = LeadStatus.SENT;
-        lead.crmStage = "Contacted";
-        lead.updatedAt = new Date().toISOString();
-
-        if (senderSmtp.warmupEnabled) {
-          senderSmtp.warmupSentToday += 1;
+        if (smtp.smtpPassword) {
+          await smtpService.sendRealSmtpEmail(smtp, item.to, item.subject, item.body);
         } else {
-          senderSmtp.sentToday += 1;
+          throw new Error("SMTP account has no password on file");
         }
-        campaign.sentCount += 1;
 
-        if (!smtpSentTimestamps[senderSmtp.id]) {
-          smtpSentTimestamps[senderSmtp.id] = [];
-        }
-        smtpSentTimestamps[senderSmtp.id].push(Date.now());
-
-        const successLog: AgentTaskLog = {
-          id: `log-queue-success-${Date.now()}`,
+        await queueRepository.markSent(item.id);
+        await leadRepository.setStatus(lead.id, LeadStatus.SENT, { crmStage: "Contacted" });
+        await smtpRepository.recordSend(smtp.id, smtp.warmupEnabled);
+        await campaignRepository.incrementCounters(campaign.id, { sentCount: 1 });
+        await this.recordRateLimit(smtp.id);
+        await agentRepository.logRun({
           agentId: "agent-deliverability",
-          timestamp: new Date().toISOString(),
-          input: `Process persistent queue item ${item.id} for lead ${item.to}`,
-          output: `Successfully dispatched email. Method: ${isRealSend ? "Real SMTP" : "Sandbox Simulation"}. Inbox sender score: ${senderSmtp.reputationScore}% | Daily quota used: ${senderSmtp.warmupEnabled ? senderSmtp.warmupSentToday : senderSmtp.sentToday}`,
-          status: "SUCCESS"
-        };
-        dbState.agentLogs.unshift(successLog);
-        dbService.saveDb();
+          input: `Dispatch ${item.id} → ${item.to}`,
+          output: `Sent via ${smtp.email}. Reputation ${smtp.reputationScore}.`,
+          status: "SUCCESS",
+        });
       } catch (err: any) {
-        console.error("[QUEUE] Dispatch failed:", err);
-        item.attempts += 1;
-        item.errorMessage = err.message || "Unknown SMTP Error";
-        item.status = item.attempts >= 3 ? "FAILED" : "QUEUED";
-
-        if (item.status === "FAILED") {
-          lead.status = LeadStatus.FAILED;
-          lead.errorMessage = err.message || "All send attempts failed";
-          lead.updatedAt = new Date().toISOString();
-          senderSmtp.errorMessage = err.message || "SMTP Connection Failed";
+        const nextRetry = new Date(Date.now() + 5 * 60 * 1000);
+        await queueRepository.markFailedOrRetry(item.id, err?.message || "SMTP error", nextRetry);
+        const attempts = item.attempts + 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          await leadRepository.setStatus(lead.id, LeadStatus.FAILED, { errorMessage: err?.message });
+          await smtpRepository.adjustReputation(smtp.id, -5, err?.message);
         }
-
-        const nextRetry = new Date();
-        nextRetry.setMinutes(nextRetry.getMinutes() + 5);
-        item.scheduledAt = nextRetry.toISOString();
-
-        const errorLog: AgentTaskLog = {
-          id: `log-queue-error-${Date.now()}`,
+        await agentRepository.logRun({
           agentId: "agent-deliverability",
-          timestamp: new Date().toISOString(),
-          input: `Process persistent queue item ${item.id} for lead ${item.to}`,
-          output: `Dispatch failure: ${err.message}. Current attempts: ${item.attempts}/3. Scheduled next retry at ${nextRetry.toISOString()}`,
-          status: "FAILED"
-        };
-        dbState.agentLogs.unshift(errorLog);
-        dbService.saveDb();
+          input: `Dispatch ${item.id} → ${item.to}`,
+          output: `Failure attempt ${attempts}/${MAX_ATTEMPTS}: ${err?.message}`,
+          status: "FAILED",
+        });
       }
     }
   }
 
-  /**
-   * Initiates the background loop intervals.
-   */
-  public static startWorkerInterval() {
+  private static async pickAvailableSmtp(healthy: SmtpAccount[]): Promise<SmtpAccount | null> {
+    const now = Date.now();
+    for (const smtp of healthy) {
+      const dailyLimit = smtp.warmupEnabled ? smtp.warmupDailyLimit : smtp.dailyLimit;
+      const sentCount = smtp.warmupEnabled ? smtp.warmupSentToday : smtp.sentToday;
+      if (sentCount >= dailyLimit) continue;
+
+      // Hourly limit via Redis counter
+      const key = `smtp:hourly:${smtp.id}`;
+      const hourly = (await redisService.get<number>(key)) ?? 0;
+      const hourlyLimit = Math.max(1, Math.ceil(dailyLimit / 5));
+      if (hourly >= hourlyLimit) continue;
+
+      // Minimum inter-send cooldown via Redis
+      const lastKey = `smtp:lastsend:${smtp.id}`;
+      const last = (await redisService.get<number>(lastKey)) ?? 0;
+      if (now - last < MIN_INTER_SEND_MS) continue;
+
+      await redisService.set(lastKey, now, RATE_LIMIT_WINDOW_SEC);
+      return smtp;
+    }
+    return null;
+  }
+
+  private static async recordRateLimit(smtpId: string): Promise<void> {
+    const key = `smtp:hourly:${smtpId}`;
+    const n = await redisService.incr(key, 1);
+    if (n === 1) await redisService.expire(key, RATE_LIMIT_WINDOW_SEC);
+  }
+
+  public static startWorkerInterval(): void {
     setInterval(() => {
-      this.runWorkerStep().catch(err => {
-        console.error("CRITICAL: background queue worker crashed:", err);
+      this.runWorkerStep().catch((err) => {
+        console.error("[worker] sweep crashed:", err?.message || err);
       });
-    }, 10000);
+    }, SWEEP_INTERVAL_MS);
+    console.log(`[worker] persistent queue worker started (sweep every ${SWEEP_INTERVAL_MS} ms)`);
   }
 }
 

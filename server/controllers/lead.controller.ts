@@ -4,154 +4,124 @@
  */
 
 import { Request, Response } from "express";
-import { dbService } from "../services/db.service";
-import { aiService } from "../services/ai.service";
+import {
+  leadRepository,
+  campaignRepository,
+  smtpRepository,
+  queueRepository,
+} from "../db/repositories";
+import { logAudit } from "../services/db.service";
+import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
+import { smtpService } from "../services/smtp.service";
 import { LeadStatus } from "../../src/types";
 
 export class LeadController {
-  public static getLeads(req: Request, res: Response) {
-    const dbState = dbService.getState();
-    const activeLeads = dbState.leads.filter(l => !l.deletedAt);
-    res.json({ success: true, data: activeLeads });
+  public static async getLeads(_req: Request, res: Response): Promise<void> {
+    const data = await leadRepository.list();
+    res.json({ success: true, data });
   }
 
-  public static updateLead(req: Request, res: Response) {
+  public static async updateLead(req: Request, res: Response): Promise<void> {
     const { leadId } = req.params;
-    const dbState = dbService.getState();
-    const lead = dbState.leads.find(l => l.id === leadId && !l.deletedAt);
-    if (!lead) {
+    const updated = await leadRepository.update(leadId, req.body);
+    if (!updated) {
       res.status(404).json({ success: false, error: "Lead not found." });
       return;
     }
-
-    const fields = ["firstName", "lastName", "company", "email", "status", "personalizedLine"];
-    for (const f of fields) {
-      if (req.body[f] !== undefined) {
-        (lead as any)[f] = req.body[f];
-      }
-    }
-
-    lead.updatedAt = new Date().toISOString();
-    dbService.saveDb();
-    res.json({ success: true, lead });
+    res.json({ success: true, lead: updated });
   }
 
-  public static updateLeadCrm(req: Request, res: Response) {
+  public static async updateLeadCrm(req: Request, res: Response): Promise<void> {
     const { leadId } = req.params;
     const { crmStage } = req.body;
-    if (!crmStage) {
-      res.status(400).json({ success: false, error: "crmStage parameter is required." });
+    if (typeof crmStage !== "string" || crmStage.trim() === "") {
+      res.status(400).json({ success: false, error: "crmStage is required." });
       return;
     }
-
-    const dbState = dbService.getState();
-    const lead = dbState.leads.find(l => l.id === leadId && !l.deletedAt);
-    if (!lead) {
+    const updated = await leadRepository.update(leadId, { crmStage });
+    if (!updated) {
       res.status(404).json({ success: false, error: "Lead not found." });
       return;
     }
-
-    lead.crmStage = crmStage;
-    lead.updatedAt = new Date().toISOString();
-    dbService.saveDb();
-    dbService.logAudit(`Lead ${lead.email} CRM stage updated to '${crmStage}'`, "LEAD");
-
-    res.json({ success: true, lead });
+    await logAudit(`Lead ${updated.email} moved to CRM stage '${crmStage}'`, "LEAD");
+    res.json({ success: true, lead: updated });
   }
 
-  public static deleteLead(req: Request, res: Response) {
+  public static async deleteLead(req: Request, res: Response): Promise<void> {
     const { leadId } = req.params;
-    const dbState = dbService.getState();
-    const lead = dbState.leads.find(l => l.id === leadId && !l.deletedAt);
+    const lead = await leadRepository.findById(leadId);
     if (!lead) {
       res.status(404).json({ success: false, error: "Lead not found." });
       return;
     }
-
-    lead.deletedAt = new Date().toISOString();
-    dbService.saveDb();
-    dbService.logAudit(`Lead ${lead.email} deleted`, "LEAD");
-
-    res.json({ success: true, message: "Lead soft-deleted successfully." });
+    await leadRepository.softDelete(leadId);
+    await logAudit(`Lead ${lead.email} deleted`, "LEAD");
+    res.json({ success: true });
   }
 
-  public static async sendEmailNow(req: Request, res: Response) {
+  public static async sendEmailNow(req: Request, res: Response): Promise<void> {
     const { leadId } = req.params;
-    const dbState = dbService.getState();
-    const lead = dbState.leads.find(l => l.id === leadId && !l.deletedAt);
+    const lead = await leadRepository.findById(leadId);
     if (!lead) {
       res.status(404).json({ success: false, error: "Lead not found." });
       return;
     }
-
-    const campaign = dbState.campaigns.find(c => c.id === lead.campaignId);
+    const campaign = await campaignRepository.findById(lead.campaignId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Associated campaign not found." });
       return;
     }
-
+    const smtps = await smtpRepository.listHealthy();
+    const smtp = smtps.find((s) => !!s.smtpPassword);
+    if (!smtp) {
+      res.status(400).json({ success: false, error: "No healthy SMTP account with credentials configured." });
+      return;
+    }
     try {
-      // Choose healthy SMTP
-      const smtp = dbState.smtpAccounts.find(s => !s.deletedAt && s.reputationScore > 50);
-      if (!smtp) {
-        res.status(400).json({ success: false, error: "No healthy SMTP server available for immediate dispatch." });
+      const { subject, body } = await aiService.composeInitialEmail(lead.id, campaign.id);
+      await smtpService.sendRealSmtpEmail(smtp, lead.email, subject, body);
+      await leadRepository.setStatus(lead.id, LeadStatus.SENT, { crmStage: "Contacted" });
+      await smtpRepository.recordSend(smtp.id, smtp.warmupEnabled);
+      await campaignRepository.incrementCounters(campaign.id, { sentCount: 1 });
+      await logAudit(`Instant email to ${lead.email}`, "SMTP", { details: `via ${smtp.email}` });
+      const refreshed = await leadRepository.findById(lead.id);
+      res.json({ success: true, message: `Email dispatched to ${lead.email}`, lead: refreshed });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || "Send failed." });
+    }
+  }
+
+  public static async enrichResearchLead(req: Request, res: Response): Promise<void> {
+    const { leadId } = req.params;
+    try {
+      const lead = await aiService.enrichAndResearchLead(leadId);
+      if (!lead) {
+        res.status(404).json({ success: false, error: "Lead not found." });
         return;
       }
-
-      // Generate personalization
-      const { subject, body } = await aiService.researchLeadAndGenerateEmail(lead.id, campaign.id);
-
-      // Perform send (simulated or real)
-      if (smtp.smtpPassword) {
-        const { smtpService } = await import("../services/smtp.service");
-        await smtpService.sendRealSmtpEmail(smtp, lead.email, subject, body);
+      res.json({ success: true, lead });
+    } catch (err) {
+      if (err instanceof GeminiNotConfiguredError) {
+        res.status(503).json({ success: false, error: err.message });
+        return;
       }
-
-      lead.status = LeadStatus.SENT;
-      lead.crmStage = "Contacted";
-      lead.updatedAt = new Date().toISOString();
-
-      smtp.sentToday += 1;
-      campaign.sentCount += 1;
-
-      dbService.saveDb();
-      dbService.logAudit(`Instant email dispatched directly to ${lead.email}`, "SMTP", undefined, `Sender: ${smtp.email}`);
-
-      res.json({ success: true, message: `Email dispatched successfully to ${lead.email}`, lead });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to dispatch instant outreach." });
+      res.status(500).json({ success: false, error: (err as Error).message });
     }
   }
 
-  public static async enrichResearchLead(req: Request, res: Response) {
-    const { leadId } = req.params;
-    const updated = await aiService.enrichAndResearchLead(leadId);
-    if (!updated) {
-      res.status(404).json({ success: false, error: "Lead not found for enrichment." });
-      return;
-    }
-
-    res.json({ success: true, message: `Lead enriched successfully.`, lead: updated });
-  }
-
-  public static async bulkEnrichResearchLeads(req: Request, res: Response) {
+  public static async bulkEnrichResearchLeads(req: Request, res: Response): Promise<void> {
     const { id: campaignId } = req.params;
-    const dbState = dbService.getState();
-    const leads = dbState.leads.filter(l => l.campaignId === campaignId && l.status === LeadStatus.PENDING && !l.aiEmails && !l.deletedAt);
-    if (leads.length === 0) {
-      res.json({ success: true, message: "No un-researched leads left in this campaign.", count: 0 });
+    const batch = await leadRepository.listPendingNeedingResearch(campaignId, 5);
+    if (batch.length === 0) {
+      res.json({ success: true, message: "No un-researched leads remaining.", count: 0 });
       return;
     }
-
-    // Slice to 5 in parallel to prevent gateway timeouts in client container
-    const batch = leads.slice(0, 5);
-    const promises = batch.map(l => aiService.enrichAndResearchLead(l.id));
-    await Promise.all(promises);
-
-    res.json({
-      success: true,
-      message: `Successfully generated deep research for ${batch.length} leads in background batch.`,
-      count: batch.length
-    });
+    if (!aiService.isConfigured()) {
+      res.status(503).json({ success: false, error: "Gemini not configured. Set GEMINI_API_KEY." });
+      return;
+    }
+    const results = await Promise.allSettled(batch.map((l) => aiService.enrichAndResearchLead(l.id)));
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    res.json({ success: true, message: `Enriched ${ok} of ${batch.length}`, count: ok });
   }
 }

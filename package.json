@@ -1,14 +1,15 @@
 {
-  "name": "react-example",
+  "name": "outbound-ai",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0-phase1",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "start": "NODE_ENV=production node dist/server.cjs",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "db:reset": "node -e \"require('dotenv').config();const {Client}=require('pg');const u=new URL(process.env.DATABASE_URL);const c=new Client({host:u.hostname,port:+u.port,user:decodeURIComponent(u.username),password:decodeURIComponent(u.password),database:u.pathname.slice(1)});c.connect().then(()=>c.query(\\\"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\\\")).then(()=>{console.log('schema reset');c.end();})\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
