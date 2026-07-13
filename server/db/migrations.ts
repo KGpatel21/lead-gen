@@ -225,7 +225,7 @@ const STATEMENTS: string[] = [
     role           VARCHAR NOT NULL,
     description    TEXT NOT NULL,
     system_prompt  TEXT NOT NULL,
-    model          VARCHAR NOT NULL DEFAULT 'gemini-2.5-flash',
+    model          VARCHAR NOT NULL DEFAULT 'gemini-2.5-flash-lite',
     status         VARCHAR NOT NULL DEFAULT 'IDLE',
     task_count     INTEGER NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()

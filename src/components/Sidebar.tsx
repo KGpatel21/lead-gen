@@ -18,8 +18,11 @@ import {
   Sun,
   Moon,
   Search,
-  Sliders
+  Sliders,
+  LogOut
 } from "lucide-react";
+import { useAuth } from "../context/AuthContext";
+import { useToast } from "../context/ToastContext";
 
 interface SidebarProps {
   currentView: string;
@@ -30,6 +33,24 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ currentView, setView, activeCampaigns, theme, setTheme }: SidebarProps) {
+  const { user, logout } = useAuth();
+  const toast = useToast();
+
+  const displayName = user?.name || user?.email?.split("@")[0] || "Guest";
+  const displayEmail = user?.email || "";
+  const displayRole = user?.role || "USER";
+  const initials = (displayName || "?")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("") || "?";
+
+  const handleLogout = () => {
+    logout();
+    toast.info("Signed out.");
+  };
+
   const sections = [
     {
       title: "COLD EMAILING PIPELINE",
@@ -147,15 +168,25 @@ export default function Sidebar({ currentView, setView, activeCampaigns, theme, 
         <div className="p-2.5 bg-slate-800/40 rounded-lg border border-slate-800/60" id="user-profile-summary">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-sm bg-slate-700 flex items-center justify-center font-bold text-[10px] text-blue-400 border border-blue-500/20">
-              KP
+              {initials}
             </div>
-            <div className="overflow-hidden">
-              <p className="text-[11px] font-semibold text-slate-200 truncate">Krutarth Patel</p>
+            <div className="overflow-hidden flex-1">
+              <p className="text-[11px] font-semibold text-slate-200 truncate" title={displayEmail}>
+                {displayName}
+              </p>
               <span className="text-[9px] font-mono text-emerald-400 flex items-center gap-1 font-semibold">
                 <span className="w-1 h-1 rounded-full bg-emerald-400 animate-ping"></span>
-                SaaS Administrator
+                {displayRole}
               </span>
             </div>
+            <button
+              onClick={handleLogout}
+              className="text-slate-400 hover:text-red-400 transition-colors p-1 rounded hover:bg-slate-800"
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>

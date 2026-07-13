@@ -23,7 +23,7 @@ export class GeminiNotConfiguredError extends Error {
   }
 }
 
-const MODEL = "gemini-2.5-flash";
+const MODEL = "gemini-flash-latest";
 
 class AiService {
   private client: GoogleGenAI | null = null;

@@ -35,7 +35,7 @@ export default function SettingsView() {
 
     setResetting(true);
     try {
-      const res = await fetch("/api/db/clear", { method: "POST" });
+      const res = await fetch("/api/testing/clear-database", { method: "POST" });
       if (res.ok) {
         setResetMessage("✔ Sandbox cleared! Reloading platform state...");
         setTimeout(() => {

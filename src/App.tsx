@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Sidebar from "./components/Sidebar";
 import DashboardView from "./components/DashboardView";
 import CampaignsView from "./components/CampaignsView";
@@ -18,19 +18,41 @@ import AutopilotConsole from "./components/AutopilotConsole";
 import AiLeadFinderView from "./components/AiLeadFinderView";
 import CrmBoardView from "./components/CrmBoardView";
 import EnterpriseConsole from "./components/EnterpriseConsole";
+import LoginPage from "./components/LoginPage";
 
 import {
-  Campaign,
-  CampaignStatus,
-  Lead,
-  SmtpAccount,
-  Domain,
-  Reply,
-  TeamMember,
-  SecurityRole
+  Campaign, CampaignStatus, SmtpAccount, Domain, Reply, TeamMember, SecurityRole,
 } from "./types";
 
-export default function App() {
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ToastProvider, useToast } from "./context/ToastContext";
+import {
+  campaignsApi, smtpApi, domainsApi, repliesApi, teamApi, templatesApi, dashboardApi,
+  DashboardStats,
+} from "./api/endpoints";
+import { ApiError } from "./api/client";
+
+const emptyStats: DashboardStats = {
+  totalSent: 0,
+  avgOpenRate: 0,
+  avgReplyRate: 0,
+  avgBounceRate: 0,
+  activeCampaignsCount: 0,
+  avgReputation: 0,
+  avgDomainHealth: 0,
+  recentReplies: [],
+  timeline: {
+    sentOverTime: [],
+    domainReputationTrend: [],
+    warmupTrend: [],
+    repliesSentimentBreakdown: [],
+  },
+};
+
+function AuthedApp() {
+  const toast = useToast();
+  const { user } = useAuth();
+
   const [currentView, setView] = useState("dashboard");
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("preferred-theme");
@@ -39,372 +61,194 @@ export default function App() {
 
   useEffect(() => {
     const root = window.document.documentElement;
-    if (theme === "dark") {
-      root.classList.add("dark");
-    } else {
-      root.classList.remove("dark");
-    }
+    if (theme === "dark") root.classList.add("dark");
+    else root.classList.remove("dark");
     localStorage.setItem("preferred-theme", theme);
   }, [theme]);
 
-  // Primary platform states synced from server JSON DB
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [smtpAccounts, setSmtpAccounts] = useState<SmtpAccount[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
   const [replies, setReplies] = useState<Reply[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [stats, setStats] = useState<DashboardStats>(emptyStats);
 
-  // Detailed dashboard stats block
-  const [stats, setStats] = useState({
-    totalSent: 0,
-    avgOpenRate: 0,
-    avgReplyRate: 0,
-    avgBounceRate: 0,
-    activeCampaignsCount: 0,
-    avgReputation: 100,
-    avgDomainHealth: 100,
-    recentReplies: [] as Reply[],
-    timeline: {
-      sentOverTime: [] as { date: string; sent: number; opens: number; replies: number }[],
-      domainReputationTrend: [] as { date: string; avgScore: number }[],
-      warmupTrend: [] as { date: string; sent: number; recovered: number }[],
-      repliesSentimentBreakdown: [] as { name: string; value: number; color: string }[]
-    }
-  });
+  const surfaceError = useCallback(
+    (label: string, err: unknown) => {
+      const msg = err instanceof ApiError ? err.message : (err as Error)?.message || String(err);
+      console.warn(`[app] ${label} failed:`, msg);
+      toast.error(`${label}: ${msg}`);
+    },
+    [toast]
+  );
 
-  // Load all foundational tables on mount
+  // ---- Data fetchers ----
+  const fetchStats = useCallback(async () => {
+    try { setStats(await dashboardApi.stats()); }
+    catch (err) { surfaceError("Dashboard stats", err); }
+  }, [surfaceError]);
+
+  const fetchCampaigns = useCallback(async () => {
+    try { setCampaigns(await campaignsApi.list()); }
+    catch (err) { surfaceError("Campaigns", err); }
+  }, [surfaceError]);
+
+  const fetchSmtp = useCallback(async () => {
+    try { setSmtpAccounts(await smtpApi.list()); }
+    catch (err) { surfaceError("SMTP accounts", err); }
+  }, [surfaceError]);
+
+  const fetchDomains = useCallback(async () => {
+    try { setDomains(await domainsApi.list()); }
+    catch (err) { surfaceError("Domains", err); }
+  }, [surfaceError]);
+
+  const fetchReplies = useCallback(async () => {
+    try { setReplies(await repliesApi.list()); }
+    catch (err) { surfaceError("Replies", err); }
+  }, [surfaceError]);
+
+  const fetchTeam = useCallback(async () => {
+    try { setTeamMembers(await teamApi.list()); }
+    catch (err) { surfaceError("Team", err); }
+  }, [surfaceError]);
+
+  const fetchAllSaaSData = useCallback(async () => {
+    await Promise.all([fetchStats(), fetchCampaigns(), fetchSmtp(), fetchDomains(), fetchReplies(), fetchTeam()]);
+  }, [fetchStats, fetchCampaigns, fetchSmtp, fetchDomains, fetchReplies, fetchTeam]);
+
   useEffect(() => {
     fetchAllSaaSData();
-
-    // Setup progressive data reload ticker to catch background simulated dispatches
     const ticker = setInterval(() => {
-      fetchStatsAndCampaigns();
-    }, 8000);
-
+      Promise.all([fetchStats(), fetchCampaigns(), fetchReplies()]).catch(() => {});
+    }, 15_000);
     return () => clearInterval(ticker);
-  }, []);
+  }, [fetchAllSaaSData, fetchStats, fetchCampaigns, fetchReplies]);
 
-  const [isServerOnline, setIsServerOnline] = useState(true);
-
-  const safeJsonFetch = async (url: string, options?: RequestInit) => {
-    try {
-      const res = await fetch(url, options);
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new Error("Received non-JSON response from server.");
-      }
-      return await res.json();
-    } catch (err: any) {
-      console.warn(`Fetch error for ${url}:`, err.message || err);
-      throw err;
-    }
-  };
-
-  const fetchAllSaaSData = async () => {
-    try {
-      await Promise.all([
-        fetchStats().catch(err => console.error("Stats fetch failed:", err)),
-        fetchCampaigns().catch(err => console.error("Campaigns fetch failed:", err)),
-        fetchSmtp().catch(err => console.error("SMTP accounts fetch failed:", err)),
-        fetchDomains().catch(err => console.error("Domains fetch failed:", err)),
-        fetchReplies().catch(err => console.error("Replies fetch failed:", err)),
-        fetchTeam().catch(err => console.error("Team fetch failed:", err))
-      ]);
-      setIsServerOnline(true);
-    } catch (err) {
-      console.error("Critical initial sync failed:", err);
-      setIsServerOnline(false);
-    }
-  };
-
-  const fetchStatsAndCampaigns = async () => {
-    try {
-      await Promise.all([
-        fetchStats(),
-        fetchCampaigns(),
-        fetchReplies()
-      ]);
-      setIsServerOnline(true);
-    } catch (err) {
-      console.warn("Background auto-refresh failed (server may be offline):", err);
-    }
-  };
-
-  // REST API calls
-  const fetchStats = async () => {
-    const data = await safeJsonFetch("/api/dashboard/stats");
-    if (data) setStats(data);
-  };
-
-  const fetchCampaigns = async () => {
-    const res = await safeJsonFetch("/api/campaigns");
-    if (res) {
-      if (res.success && Array.isArray(res.data)) {
-        setCampaigns(res.data);
-      } else if (Array.isArray(res)) {
-        setCampaigns(res);
-      } else if (res.data && Array.isArray(res.data)) {
-        setCampaigns(res.data);
-      }
-    }
-  };
-
-  const fetchSmtp = async () => {
-    const data = await safeJsonFetch("/api/smtp-accounts");
-    if (data) {
-      if (Array.isArray(data)) {
-        setSmtpAccounts(data);
-      } else if (data.success && Array.isArray(data.data)) {
-        setSmtpAccounts(data.data);
-      } else if (Array.isArray(data.data)) {
-        setSmtpAccounts(data.data);
-      }
-    }
-  };
-
-  const fetchDomains = async () => {
-    const data = await safeJsonFetch("/api/domains");
-    if (data) {
-      if (Array.isArray(data)) {
-        setDomains(data);
-      } else if (data.success && Array.isArray(data.data)) {
-        setDomains(data.data);
-      } else if (Array.isArray(data.data)) {
-        setDomains(data.data);
-      }
-    }
-  };
-
-  const fetchReplies = async () => {
-    const data = await safeJsonFetch("/api/replies");
-    if (data) {
-      if (Array.isArray(data)) {
-        setReplies(data);
-      } else if (data.success && Array.isArray(data.data)) {
-        setReplies(data.data);
-      } else if (Array.isArray(data.data)) {
-        setReplies(data.data);
-      }
-    }
-  };
-
-  const fetchTeam = async () => {
-    const data = await safeJsonFetch("/api/team");
-    if (data) {
-      if (Array.isArray(data)) {
-        setTeamMembers(data);
-      } else if (data.success && Array.isArray(data.data)) {
-        setTeamMembers(data.data);
-      } else if (Array.isArray(data.data)) {
-        setTeamMembers(data.data);
-      }
-    }
-  };
-
-  // Action Controllers passed down
+  // ---- Action handlers ----
   const handleCampaignStatusChange = async (id: string, newStatus: CampaignStatus) => {
     try {
-      const res = await fetch(`/api/campaigns/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (res.ok) {
-        setCampaigns(campaigns.map(c => c.id === id ? { ...c, status: newStatus } : c));
-        fetchStats();
-      }
-    } catch (err) {
-      console.error(err);
-    }
+      const updated = await campaignsApi.update(id, { status: newStatus });
+      setCampaigns((cur) => cur.map((c) => (c.id === id ? updated : c)));
+      fetchStats();
+      toast.success(`Campaign ${newStatus.toLowerCase()}.`);
+    } catch (err) { surfaceError("Update campaign status", err); }
   };
 
   const handleCreateCampaign = async (name: string, subject: string, body: string): Promise<Campaign> => {
-    const res = await fetch("/api/campaigns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, subjectTemplate: subject, bodyTemplate: body }),
-    });
-    const created = await res.json();
-    const campaignObj = created.success && created.data ? created.data : created;
-    setCampaigns([...campaigns, campaignObj]);
-    return campaignObj;
+    const created = await campaignsApi.create({ name, subjectTemplate: subject, bodyTemplate: body });
+    setCampaigns((cur) => [created, ...cur]);
+    toast.success(`Campaign "${created.name}" created.`);
+    return created;
   };
 
   const handleDeleteCampaign = async (id: string) => {
-    const res = await fetch(`/api/campaigns/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setCampaigns(campaigns.filter(c => c.id !== id));
+    try {
+      await campaignsApi.delete(id);
+      setCampaigns((cur) => cur.filter((c) => c.id !== id));
       fetchStats();
-    }
+      toast.success("Campaign deleted.");
+    } catch (err) { surfaceError("Delete campaign", err); }
   };
 
-  const handleUpdateCampaign = async (id: string, updateData: Partial<Campaign>) => {
-    const res = await fetch(`/api/campaigns/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updateData),
-    });
-    if (res.ok) {
-      const updated = await res.json();
-      const campaignObj = updated.success && updated.data ? updated.data : updated;
-      setCampaigns(campaigns.map(c => c.id === id ? campaignObj : c));
-    }
+  const handleUpdateCampaign = async (id: string, patch: Partial<Campaign>) => {
+    try {
+      const updated = await campaignsApi.update(id, patch);
+      setCampaigns((cur) => cur.map((c) => (c.id === id ? updated : c)));
+    } catch (err) { surfaceError("Update campaign", err); }
   };
 
-  const handleAddSmtp = async (smtpData: any): Promise<SmtpAccount> => {
-    const res = await fetch("/api/smtp-accounts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(smtpData),
-    });
-    const added = await res.json();
-    setSmtpAccounts([...smtpAccounts, added]);
-    setDomains(domains.map(d => smtpData.email.endsWith(d.name) ? { ...d, inboxCount: d.inboxCount + 1 } : d));
+  const handleAddSmtp = async (payload: any): Promise<SmtpAccount> => {
+    const added = await smtpApi.create(payload);
+    setSmtpAccounts((cur) => [added, ...cur]);
+    toast.success(`SMTP account added: ${added.email}`);
     return added;
   };
 
-  const handleUpdateSmtp = async (id: string, updateData: Partial<SmtpAccount>) => {
-    const res = await fetch(`/api/smtp-accounts/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updateData),
-    });
-    if (res.ok) {
-      const updated = await res.json();
-      setSmtpAccounts(smtpAccounts.map(s => s.id === id ? updated : s));
-      fetchStats();
-    }
+  const handleUpdateSmtp = async (id: string, patch: Partial<SmtpAccount>) => {
+    try {
+      const updated = await smtpApi.update(id, patch);
+      setSmtpAccounts((cur) => cur.map((s) => (s.id === id ? updated : s)));
+    } catch (err) { surfaceError("Update SMTP", err); }
   };
 
   const handleDeleteSmtp = async (id: string) => {
-    const target = smtpAccounts.find(s => s.id === id);
-    const res = await fetch(`/api/smtp-accounts/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setSmtpAccounts(smtpAccounts.filter(s => s.id !== id));
-      if (target) {
-        setDomains(domains.map(d => target.email.endsWith(d.name) ? { ...d, inboxCount: Math.max(0, d.inboxCount - 1) } : d));
-      }
-    }
+    try {
+      await smtpApi.delete(id);
+      setSmtpAccounts((cur) => cur.filter((s) => s.id !== id));
+      toast.success("SMTP account removed.");
+    } catch (err) { surfaceError("Delete SMTP", err); }
   };
 
   const handleTestSmtp = async (id: string) => {
-    const res = await fetch(`/api/smtp-accounts/${id}/test`, {
-      method: "POST",
-    });
-    if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.details || errData.error || "Failed to connect to SMTP server");
-    }
-    const smtpRes = await fetch("/api/smtp-accounts");
-    if (smtpRes.ok) {
-      const updatedList = await smtpRes.json();
-      setSmtpAccounts(updatedList);
-    }
+    await smtpApi.test(id);
+    toast.success("SMTP handshake succeeded.");
+    fetchSmtp();
   };
 
-  const handleAddDomain = async (domainName: string): Promise<Domain> => {
-    const res = await fetch("/api/domains", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: domainName }),
-    });
-    const added = await res.json();
-    setDomains([...domains, added]);
+  const handleAddDomain = async (name: string): Promise<Domain> => {
+    const added = await domainsApi.create(name);
+    setDomains((cur) => [added, ...cur]);
+    toast.success(`Domain "${added.name}" added.`);
     return added;
   };
 
   const handleVerifyDomain = async (id: string): Promise<Domain> => {
-    const res = await fetch(`/api/domains/${id}/verify`, { method: "PUT" });
-    const verified = await res.json();
-    setDomains(domains.map(d => d.id === id ? verified : d));
+    const verified = await domainsApi.verify(id);
+    setDomains((cur) => cur.map((d) => (d.id === id ? verified : d)));
     fetchStats();
+    toast.info(`SPF ${verified.spfStatus} / DKIM ${verified.dkimStatus} / DMARC ${verified.dmarcStatus}`);
     return verified;
   };
 
   const handleDeleteDomain = async (id: string) => {
-    const res = await fetch(`/api/domains/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setDomains(domains.filter(d => d.id !== id));
-    }
+    try {
+      await domainsApi.delete(id);
+      setDomains((cur) => cur.filter((d) => d.id !== id));
+      toast.success("Domain removed.");
+    } catch (err) { surfaceError("Delete domain", err); }
   };
 
-  const handleSaveTemplateAsTemplate = async (name: string, subject: string, body: string, category: string) => {
-    const res = await fetch("/api/templates", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, subject, body, category }),
-    });
-    return await res.json();
+  const handleSaveTemplate = async (name: string, subject: string, body: string, category: string) => {
+    const created = await templatesApi.create({ name, subject, body, category });
+    toast.success(`Template "${created.name}" saved.`);
+    return created;
   };
 
   const handleInviteMember = async (name: string, email: string, role: SecurityRole): Promise<TeamMember> => {
-    const res = await fetch("/api/team/invite", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, role }),
-    });
-    const invited = await res.json();
-    setTeamMembers([...teamMembers, invited]);
-    return invited;
+    const { member, inviteToken } = await teamApi.invite({ name, email, role });
+    setTeamMembers((cur) => [...cur, member]);
+    toast.success(`Invite created. Token: ${inviteToken.slice(0, 12)}…`);
+    return member;
   };
 
   const handleMarkReplyRead = async (id: string) => {
-    await fetch(`/api/replies/${id}/read`, { method: "POST" });
-    setReplies(replies.map(r => r.id === id ? { ...r, isRead: true } : r));
-    fetchStats();
+    try {
+      const updated = await repliesApi.markRead(id);
+      setReplies((cur) => cur.map((r) => (r.id === id ? updated : r)));
+      fetchStats();
+    } catch (err) { surfaceError("Mark reply read", err); }
   };
 
   const handleGenerateAiReply = async (id: string): Promise<string> => {
-    const res = await fetch(`/api/replies/${id}/ai-reply`, { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Generation error");
-    
-    // Auto sync state update
-    setReplies(replies.map(r => r.id === id ? { ...r, aiSuggestedReply: data.draft } : r));
-    return data.draft;
+    const result = await repliesApi.generateAiReply(id);
+    setReplies((cur) => cur.map((r) => (r.id === id ? { ...r, aiSuggestedReply: result.aiReplyDraft } : r)));
+    return result.aiReplyDraft;
   };
 
   const handleSendReply = async (id: string, body: string) => {
-    const res = await fetch(`/api/replies/${id}/send-reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body }),
-    });
-    if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.details || errData.error || "Failed to dispatch reply");
-    }
+    await repliesApi.send(id, body);
+    toast.success("Response recorded.");
   };
 
-  // Render match layout
   const renderMainView = () => {
     switch (currentView) {
       case "dashboard":
-        return (
-          <DashboardView
-            stats={stats}
-            onNavigate={(view) => setView(view)}
-            onReadReply={handleMarkReplyRead}
-          />
-        );
+        return <DashboardView stats={stats as any} onNavigate={setView} onReadReply={handleMarkReplyRead} />;
       case "crm":
-        return (
-          <CrmBoardView
-            campaigns={campaigns}
-            onRefreshAllData={fetchAllSaaSData}
-          />
-        );
+        return <CrmBoardView campaigns={campaigns} onRefreshAllData={fetchAllSaaSData} />;
       case "lead-finder":
-        return (
-          <AiLeadFinderView
-            campaigns={campaigns}
-            onCreateCampaign={handleCreateCampaign}
-            onRefreshAllData={fetchAllSaaSData}
-          />
-        );
+        return <AiLeadFinderView campaigns={campaigns} onCreateCampaign={handleCreateCampaign} onRefreshAllData={fetchAllSaaSData} />;
       case "campaigns":
         return (
           <CampaignsView
@@ -444,41 +288,29 @@ export default function App() {
           />
         );
       case "ai-generator":
-        return (
-          <AiGeneratorView
-            onSaveTemplate={handleSaveTemplateAsTemplate}
-          />
-        );
+        return <AiGeneratorView onSaveTemplate={handleSaveTemplate} />;
       case "ai-agents":
         return <AgentsView />;
       case "autopilot":
         return <AutopilotConsole />;
       case "team":
-        return (
-          <TeamView
-            members={teamMembers}
-            onInviteMember={handleInviteMember}
-          />
-        );
+        return <TeamView members={teamMembers} onInviteMember={handleInviteMember} />;
       case "settings":
         return <SettingsView />;
       case "enterprise":
-        return (
-          <EnterpriseConsole
-            smtpAccounts={smtpAccounts}
-            domains={domains}
-            onRefreshAllData={fetchAllSaaSData}
-          />
-        );
+        return <EnterpriseConsole smtpAccounts={smtpAccounts} domains={domains} onRefreshAllData={fetchAllSaaSData} />;
       default:
-        return <AutopilotConsole />;
+        return <DashboardView stats={stats as any} onNavigate={setView} onReadReply={handleMarkReplyRead} />;
     }
   };
 
-  const runningCampaignsCount = campaigns.filter(c => c.status === CampaignStatus.RUNNING).length;
+  const runningCampaignsCount = campaigns.filter((c) => c.status === CampaignStatus.RUNNING).length;
 
   return (
-    <div className="flex bg-[#f8fafc] text-slate-800 dark:bg-slate-950 dark:text-slate-100 min-h-screen font-sans transition-colors duration-200" id="applet-primary-container">
+    <div
+      className="flex bg-[#f8fafc] text-slate-800 dark:bg-slate-950 dark:text-slate-100 min-h-screen font-sans transition-colors duration-200"
+      id="applet-primary-container"
+    >
       <Sidebar
         currentView={currentView}
         setView={setView}
@@ -486,7 +318,29 @@ export default function App() {
         theme={theme}
         setTheme={setTheme}
       />
-      {renderMainView()}
+      <div className="flex-1 min-w-0">{renderMainView()}</div>
     </div>
+  );
+}
+
+function AppRoot() {
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100 dark:bg-slate-950 text-slate-500 dark:text-slate-400">
+        <div className="text-sm animate-pulse">Restoring session…</div>
+      </div>
+    );
+  }
+  return user ? <AuthedApp /> : <LoginPage />;
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <AuthProvider>
+        <AppRoot />
+      </AuthProvider>
+    </ToastProvider>
   );
 }
