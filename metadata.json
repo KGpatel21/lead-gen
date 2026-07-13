@@ -1,0 +1,6 @@
+{
+  "name": "Outbound AI Lead Generation",
+  "description": "Enterprise-grade Cold Outbound SaaS platform featuring SMTP/domain rotation, inbox warmup, unified replies mailbox, and Gemini AI personalization engines.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
