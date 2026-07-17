@@ -37,6 +37,15 @@ interface AppConfig {
   googleClientSecret: string | null;
   microsoftClientId: string | null;
   microsoftClientSecret: string | null;
+
+  googlePlacesApiKey: string | null;
+  firecrawlApiKey: string | null;
+
+  awsAccessKeyId: string | null;
+  awsSecretAccessKey: string | null;
+  awsRegion: string;
+  sesFromEmail: string | null;
+  sesConfigurationSet: string | null;
 }
 
 function required(name: string): string {
@@ -83,6 +92,15 @@ export const config: AppConfig = {
   googleClientSecret: optional("GOOGLE_CLIENT_SECRET"),
   microsoftClientId: optional("MICROSOFT_CLIENT_ID"),
   microsoftClientSecret: optional("MICROSOFT_CLIENT_SECRET"),
+
+  googlePlacesApiKey: optional("GOOGLE_PLACES_API_KEY"),
+  firecrawlApiKey: optional("FIRECRAWL_API_KEY"),
+
+  awsAccessKeyId: optional("AWS_ACCESS_KEY_ID"),
+  awsSecretAccessKey: optional("AWS_SECRET_ACCESS_KEY"),
+  awsRegion: process.env.AWS_REGION?.trim() || "us-east-1",
+  sesFromEmail: optional("SES_FROM_EMAIL"),
+  sesConfigurationSet: optional("SES_CONFIGURATION_SET"),
 };
 
 if (config.jwtSecret.length < 24) {

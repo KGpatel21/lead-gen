@@ -197,6 +197,16 @@ async function startFullStackServer(): Promise<void> {
   });
 }
 
+// Keep the server alive if an async route handler rejects without next(err).
+// Express 4 doesn't auto-forward async rejections; without this the whole
+// process would die on a single flaky DB call. Log and keep serving.
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[unhandledRejection]", reason?.message || reason);
+});
+process.on("uncaughtException", (err: Error) => {
+  console.error("[uncaughtException]", err.message);
+});
+
 startFullStackServer().catch((err) => {
   console.error("[boot] fatal:", err?.message || err);
   process.exit(1);

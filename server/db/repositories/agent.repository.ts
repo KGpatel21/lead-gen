@@ -69,7 +69,7 @@ export const DEFAULT_AGENTS: Omit<AiAgent, "taskCount" | "status">[] = [
       "Prospects high-converting target leads for specific business niches, looks up domains, and writes direct intro icebreakers.",
     systemPrompt:
       "You are Lead Hunter Pro, an elite sales prospecting agent. Your job is to search for high-value prospect leads in a given niche and location. Synthesize contact details, company name, contact motivation, and a bespoke icebreaker. Return the leads in structured, easy-to-read markdown table.",
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-flash-lite-latest",
   },
   {
     id: "agent-copywriter",
@@ -79,7 +79,7 @@ export const DEFAULT_AGENTS: Omit<AiAgent, "taskCount" | "status">[] = [
       "Drafts highly personalized cold email templates using psychological copy blocks (AIDA, PAS).",
     systemPrompt:
       "You are Copywriter Ninja, a world-class cold email outreach copywriter. Your job is to generate dynamic sequence scripts based on target industries, value propositions, and pain points. Return 1 high-converting email template with subject and body tags.",
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-flash-lite-latest",
   },
   {
     id: "agent-classifier",
@@ -89,7 +89,7 @@ export const DEFAULT_AGENTS: Omit<AiAgent, "taskCount" | "status">[] = [
       "Filters incoming replies, categorizes sentiments (interested/objections), and drafts suggested objections handlings.",
     systemPrompt:
       "You are Smart Triage Classifier. Parse the incoming email text, label its core sentiment as 'interested', 'not interested', 'meeting booked', or 'spam/optout'. Suggest a bulletproof action plan and pitch-perfect follow-up draft.",
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-flash-lite-latest",
   },
   {
     id: "agent-deliverability",
@@ -99,6 +99,6 @@ export const DEFAULT_AGENTS: Omit<AiAgent, "taskCount" | "status">[] = [
       "Scans campaign copies for spam trigger terms, excessive punctuation, and certifies SPF/DKIM sanity.",
     systemPrompt:
       "You are Inbox Health Sentry, a technical deliverability specialist. Analyze the draft for spam trigger words, formatting red flags, and SPF/DKIM verification. Suggest direct fixes to preserve high email reputation scores.",
-    model: "gemini-2.5-flash-lite",
+    model: "gemini-flash-lite-latest",
   },
 ];

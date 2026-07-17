@@ -211,3 +211,111 @@ export const automationApi = {
     return api.raw<any>("POST", "/api/autopilot/dispatch", payload);
   },
 };
+
+// ---- Lead Discovery pipeline (Places → Firecrawl → Gemini → SES) ----
+
+export interface DiscoveredBusiness {
+  id: string;
+  placeId: string;
+  name: string;
+  address?: string;
+  latitude?: number;
+  longitude?: number;
+  phone?: string;
+  website?: string;
+  googleMapsUrl?: string;
+  googleRating?: number;
+  googleReviewsCount?: number;
+  businessCategory?: string;
+  businessTypes?: string[];
+  businessStatus?: string;
+}
+
+export interface GeneratedEmail {
+  id: string;
+  campaignId?: string;
+  businessId?: string;
+  toEmail: string;
+  fromEmail?: string;
+  subject: string;
+  bodyText: string;
+  bodyHtml?: string;
+  openingLine?: string;
+  painPoints?: string[];
+  benefits?: string[];
+  cta?: string;
+  confidenceScore?: number;
+  emailTone?: string;
+  status: string;
+  provider?: string;
+  messageId?: string;
+  errorMessage?: string;
+  sentAt?: string;
+  createdAt: string;
+}
+
+export const leadDiscoveryApi = {
+  search(payload: { query: string; city?: string; count?: number; pageToken?: string }) {
+    return api.raw<{
+      success: boolean;
+      totalFetched: number;
+      cachedPages: number;
+      freshPages: number;
+      nextPageToken?: string;
+      businesses: DiscoveredBusiness[];
+    }>("POST", "/api/leads/search", payload);
+  },
+  analyze(businessIds: string[]) {
+    return api.raw<{
+      success: boolean;
+      results: Array<{ businessId: string; businessName?: string; status: string; reason?: string; cache?: boolean }>;
+    }>("POST", "/api/business/analyze", { businessIds });
+  },
+  generateEmail(payload: {
+    businessId: string;
+    campaignId?: string;
+    toEmail?: string;
+    senderName: string;
+    senderCompany: string;
+    targetService: string;
+    valueProp?: string;
+    tone?: string;
+  }) {
+    return api.raw<{ success: boolean; email: GeneratedEmail; business: DiscoveredBusiness }>(
+      "POST",
+      "/api/email/generate",
+      payload
+    );
+  },
+  createCampaign(payload: { name: string; businessIds: string[] }) {
+    return api.raw<{ success: boolean; campaign: any; businessCount: number }>(
+      "POST",
+      "/api/campaign/create",
+      payload
+    );
+  },
+  sendCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; sent: number; failed: number; total: number }>(
+      "POST",
+      `/api/campaign/${campaignId}/send`
+    );
+  },
+  pauseCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; paused: number }>("POST", `/api/campaign/${campaignId}/pause`);
+  },
+  resumeCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; resumed: number }>("POST", `/api/campaign/${campaignId}/resume`);
+  },
+  cancelCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; cancelled: number }>("POST", `/api/campaign/${campaignId}/cancel`);
+  },
+  getCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; campaign: any; emails: GeneratedEmail[] }>(
+      "GET",
+      `/api/campaign/${campaignId}`
+    );
+  },
+  getCampaignStats(campaignId: string) {
+    return api.raw<{ success: boolean; stats: Record<string, number> }>("GET", `/api/campaign/${campaignId}/stats`);
+  },
+};

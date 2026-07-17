@@ -12,7 +12,15 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { config } from "../config";
-import { agentRepository, leadRepository, campaignRepository } from "../db/repositories";
+import {
+  agentRepository,
+  leadRepository,
+  campaignRepository,
+  businessRepository,
+  businessProfileRepository,
+  Business,
+  BusinessProfile,
+} from "../db/repositories";
 import { Lead, ReplySentiment } from "../../src/types";
 
 export class GeminiNotConfiguredError extends Error {
@@ -23,7 +31,7 @@ export class GeminiNotConfiguredError extends Error {
   }
 }
 
-const MODEL = "gemini-flash-latest";
+const MODEL = "gemini-flash-lite-latest";
 
 class AiService {
   private client: GoogleGenAI | null = null;
@@ -99,11 +107,13 @@ Return ONLY a raw JSON object matching this schema exactly:
 Do not include markdown code fences.
 `;
 
+    // Reasoning-only: no Google Search grounding. Grounding drove the
+    // 429 quota exhaustion, and enrichment is now sourced from Firecrawl
+    // + Google Places via businessProfileRepository (see generateEmailForBusiness).
     const response = await ai.models.generateContent({
       model: MODEL,
       contents: prompt,
       config: {
-        tools: [{ googleSearch: {} }],
         responseMimeType: "application/json",
       },
     });
@@ -318,9 +328,143 @@ Return ONLY raw JSON:
     const response = await ai.models.generateContent({
       model: MODEL,
       contents: prompt,
-      config: { tools: [{ googleSearch: {} }], responseMimeType: "application/json" },
+      // Grounding permanently removed from autopilot — Places API is now
+      // the source-of-truth for real businesses.
+      config: { responseMimeType: "application/json" },
     });
     return AiService.parseJsonResponse(response.text || "");
+  }
+
+  // ------------------------------------------------------------------
+  // Lead-discovery pipeline: reasoning-only email generation from
+  // extracted Places + Firecrawl data. This is the primary path going
+  // forward; `enrichAndResearchLead` above is kept for backward compat
+  // with the older campaign-lead flow.
+  // ------------------------------------------------------------------
+
+  public async generateEmailForBusiness(input: {
+    businessId: string;
+    targetService: string;
+    senderName: string;
+    senderCompany: string;
+    valueProp?: string;
+    tone?: "Direct" | "Warm" | "Consultative" | "Playful";
+  }): Promise<{
+    subject: string;
+    openingLine: string;
+    bodyText: string;
+    bodyHtml: string;
+    painPoints: string[];
+    benefits: string[];
+    cta: string;
+    confidenceScore: number;
+    emailTone: string;
+  }> {
+    const ai = this.require();
+    const business = await businessRepository.findById(input.businessId);
+    if (!business) throw new Error(`Business ${input.businessId} not found`);
+    const profile = await businessProfileRepository.findByBusinessId(business.id);
+
+    // Build a compact structured context from extracted data ONLY.
+    // No web-search. No fabricated facts.
+    const facts = this.buildFactSheet(business, profile);
+    const factsCount = Object.keys(facts).length;
+
+    const prompt = `
+You are a senior B2B copywriter. Write a single cold outreach email using ONLY
+the facts listed below. Never invent facts, statistics, or achievements. If a
+detail is missing, omit it rather than guess.
+
+FACTS ABOUT THE PROSPECT (verified via Google Places + their public website):
+${JSON.stringify(facts, null, 2)}
+
+WHO IS EMAILING THEM:
+- Sender name: ${input.senderName}
+- Sender company: ${input.senderCompany}
+- Target service being offered: ${input.targetService}
+${input.valueProp ? `- Value proposition: ${input.valueProp}` : ""}
+
+STYLE:
+- Tone: ${input.tone || "Consultative"}
+- Length: 90–140 words body.
+- One clear call-to-action.
+- No generic "hope this email finds you well".
+- No em-dashes.
+- No emojis.
+- Subject line: 4-7 words, no clickbait, no ALL CAPS.
+- Opening line: reference ONE concrete detail from the facts above (business name,
+  service they offer, or public rating). Under 20 words.
+- confidenceScore: 0.0-1.0. Reflects how strongly the FACTS support this pitch;
+  drop it below 0.5 if you had to omit key facts.
+
+Return ONLY raw JSON matching:
+{
+  "subject": "string",
+  "openingLine": "string",
+  "bodyText": "string (plain text version, \\n newlines)",
+  "bodyHtml": "string (well-formed HTML: paragraphs, no external CSS)",
+  "painPoints": ["string", "..."],
+  "benefits":  ["string", "..."],
+  "cta": "string",
+  "confidenceScore": number,
+  "emailTone": "string"
+}
+No markdown code fences.
+`;
+
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: prompt,
+      config: { responseMimeType: "application/json" },
+    });
+
+    const parsed = AiService.parseJsonResponse<{
+      subject: string;
+      openingLine: string;
+      bodyText: string;
+      bodyHtml: string;
+      painPoints: string[];
+      benefits: string[];
+      cta: string;
+      confidenceScore: number;
+      emailTone: string;
+    }>(response.text || "");
+
+    await agentRepository.logRun({
+      agentId: "agent-copywriter",
+      input: `Generate email for ${business.name} (${business.id}); ${factsCount} verified facts`,
+      output: `subject="${parsed.subject}" tone=${parsed.emailTone} confidence=${parsed.confidenceScore}`,
+      status: "SUCCESS",
+    });
+
+    return parsed;
+  }
+
+  private buildFactSheet(business: Business, profile: BusinessProfile | null): Record<string, unknown> {
+    const facts: Record<string, unknown> = {
+      businessName: business.name,
+    };
+    if (business.address) facts.address = business.address;
+    if (business.businessCategory) facts.category = business.businessCategory;
+    if (business.website) facts.website = business.website;
+    if (business.phone) facts.phone = business.phone;
+    if (business.googleRating != null) {
+      facts.googleRating = business.googleRating;
+      if (business.googleReviewsCount != null) facts.googleReviewsCount = business.googleReviewsCount;
+    }
+    if (business.googleMapsUrl) facts.googleMapsUrl = business.googleMapsUrl;
+
+    if (profile && profile.firecrawlStatus === "SUCCESS") {
+      if (profile.extractedDescription) facts.publicDescription = profile.extractedDescription.slice(0, 400);
+      if (profile.extractedAboutUs) facts.aboutUs = profile.extractedAboutUs.slice(0, 500);
+      if (profile.extractedServices?.length) facts.publishedServices = profile.extractedServices.slice(0, 10);
+      if (profile.extractedProducts?.length) facts.publishedProducts = profile.extractedProducts.slice(0, 10);
+      if (profile.extractedIndustry) facts.industry = profile.extractedIndustry;
+      if (profile.extractedTechnologies?.length) facts.technologies = profile.extractedTechnologies.slice(0, 10);
+      if (profile.extractedCompanySize) facts.companySize = profile.extractedCompanySize;
+    }
+
+    return facts;
   }
 }
 

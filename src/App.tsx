@@ -18,6 +18,7 @@ import AutopilotConsole from "./components/AutopilotConsole";
 import AiLeadFinderView from "./components/AiLeadFinderView";
 import CrmBoardView from "./components/CrmBoardView";
 import EnterpriseConsole from "./components/EnterpriseConsole";
+import LeadDiscoveryView from "./components/LeadDiscoveryView";
 import LoginPage from "./components/LoginPage";
 
 import {
@@ -245,6 +246,8 @@ function AuthedApp() {
     switch (currentView) {
       case "dashboard":
         return <DashboardView stats={stats as any} onNavigate={setView} onReadReply={handleMarkReplyRead} />;
+      case "lead-discovery":
+        return <LeadDiscoveryView />;
       case "crm":
         return <CrmBoardView campaigns={campaigns} onRefreshAllData={fetchAllSaaSData} />;
       case "lead-finder":

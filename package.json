@@ -12,7 +12,10 @@
     "db:reset": "node -e \"require('dotenv').config();const {Client}=require('pg');const u=new URL(process.env.DATABASE_URL);const c=new Client({host:u.hostname,port:+u.port,user:decodeURIComponent(u.username),password:decodeURIComponent(u.password),database:u.pathname.slice(1)});c.connect().then(()=>c.query(\\\"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\\\")).then(()=>{console.log('schema reset');c.end();})\""
   },
   "dependencies": {
+    "@aws-sdk/client-sesv2": "^3.1090.0",
     "@google/genai": "^2.4.0",
+    "@googlemaps/google-maps-services-js": "^3.4.2",
+    "@mendable/firecrawl-js": "^4.30.1",
     "@tailwindcss/vite": "^4.1.14",
     "@types/nodemailer": "^8.0.1",
     "@vitejs/plugin-react": "^5.0.4",

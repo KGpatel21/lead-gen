@@ -1,16 +1,57 @@
 # Outbound.AI — Cold Email & Lead Generation Platform
 
-A full-stack TypeScript SaaS for AI-driven outbound sales sequences.
-React + Vite frontend, Express backend, PostgreSQL persistence, Redis
-rate-limiting, Nodemailer SMTP dispatch, Google Gemini for lead enrichment
-and reply triage, and Stripe for billing.
+Production-grade AI outbound platform. Google Places for real lead discovery,
+Firecrawl for real website analysis, Gemini for reasoning-only email drafting,
+Amazon SES for delivery — plus a React + Vite dashboard, Express + Postgres
+backend, Redis for rate limits, JWT auth, and a persistent queue.
 
-> **Status:** Phase 1 — core is production-shaped (real auth, real DB,
-> real rate limits, no fake data). Phase 2 (BullMQ, IMAP reply
-> ingestion, warmup engine, open/click tracking) and Phase 3 (real Gmail
-> and Outlook OAuth token exchange, Docker, tests) are still ahead.
-> See **Known Issues** and **Roadmap** below for exactly what's done and
-> what isn't.
+> **Status:** Phase 1.7 — production Lead Discovery pipeline shipped
+> (Places → Firecrawl → Gemini reasoning → SES). Nodemailer + Gmail SMTP
+> path preserved as an alternate delivery route. BullMQ, IMAP reply
+> ingestion, and SNS bounce/complaint webhooks are Phase 2. See **Known
+> Issues** and **Roadmap** at the bottom.
+
+## Lead Discovery pipeline (primary)
+
+```
+User query ("dental clinics in Austin")
+  │
+  ▼
+Google Places API (New) — v1 Text Search
+  │  fields: name, address, website, phone, rating, review count, category
+  │  paginated up to 60 results
+  │  cached by (query, city, page-token) hash for 24h
+  ▼
+Postgres — businesses  ◄─── upserted by place_id (deduplicated)
+  │
+  ▼  (user picks businesses to analyze)
+Firecrawl v2 scrape
+  │  markdown extraction, retry with exponential backoff,
+  │  45s timeout, Redis 60/min rate limit,
+  │  cached by URL hash for 24h
+  ▼
+Postgres — business_profiles
+  │  description, services, products, tech stack, emails, phones,
+  │  social links — all extracted from the real scraped page
+  │
+  ▼  (user provides target service + sender identity)
+Google Gemini — reasoning ONLY
+  │  Zero grounding. Zero web-search.
+  │  Prompt contains only VERIFIED facts from Places + Firecrawl.
+  │  Model: gemini-flash-lite-latest
+  ▼
+Postgres — emails
+  │  subject, opening line, body (plain + HTML), pain points, benefits,
+  │  CTA, confidence score, tone — status = READY
+  │
+  ▼  (user clicks "Send via SES")
+Amazon SES v2
+  │  X-Campaign-Id + X-Email-Id tracking headers
+  │  Config-set opt-in for downstream event publishing (SNS/CloudWatch)
+  │  Exponential-backoff retry for transient errors
+  ▼
+Postgres — email_events + emails.status = SENT
+```
 
 ---
 
@@ -44,10 +85,10 @@ and reply triage, and Stripe for billing.
 
 Outbound.AI helps sales teams:
 
-1. **Prospect leads** — manually, via CSV upload, or with Gemini-backed
-   autopilot search (Google Search grounding).
-2. **Personalize outreach** — deep AI research on each lead: business
-   summary, pain points, and a 4-step email sequence.
+1. **Prospect leads** — Google Places API (New) v1 Text Search backed by
+   Postgres-cached queries.
+2. **Analyze websites** — Firecrawl v2 with retry, timeout, rate limiting,
+   and Postgres URL cache.
 3. **Dispatch email** — SMTP send from user-owned inboxes with per-account
    daily limits and Redis-backed hourly rate limiting.
 4. **Track deliverability** — SPF / DKIM / DMARC / MX DNS verification per
@@ -204,7 +245,14 @@ server refuses to start if a required variable is missing.
 | `REDIS_URL`                  | **yes**             | Redis connection string                             |
 | `JWT_SECRET`                 | **yes** (≥ 24 chars) | HMAC key for JWT                                    |
 | `ENCRYPTION_KEY`             | **yes** (≥ 24 chars) | Seed for AES-256 SMTP-password encryption           |
-| `GEMINI_API_KEY`             | AI features         | Enables enrichment, autopilot, reply triage         |
+| `GEMINI_API_KEY`             | AI features         | Reasoning-only email generation (no web-search)     |
+| `GOOGLE_PLACES_API_KEY`      | Lead Discovery      | Real business search via Places API (New)           |
+| `FIRECRAWL_API_KEY`          | Lead Discovery      | Website scraping / structured extraction            |
+| `AWS_ACCESS_KEY_ID`          | SES delivery        | Amazon SES v2 credentials                           |
+| `AWS_SECRET_ACCESS_KEY`      | SES delivery        | Amazon SES v2 credentials                           |
+| `AWS_REGION`                 | SES delivery        | Default `us-east-1`                                 |
+| `SES_FROM_EMAIL`             | SES delivery        | Verified sender identity                            |
+| `SES_CONFIGURATION_SET`      | SES optional        | Config set for event publishing (SNS/CloudWatch)    |
 | `STRIPE_SECRET_KEY`          | billing             | Enables checkout / portal / webhook                 |
 | `STRIPE_WEBHOOK_SECRET`      | billing             | Verifies Stripe webhook signatures                  |
 | `STRIPE_PRICE_FREE_ID`       | billing             | Price ID for the Free tier subscription             |
@@ -390,7 +438,19 @@ GET    /api/templates
 POST   /api/templates
 
 GET    /api/dashboard/stats                       real counts from Postgres
-POST   /api/autopilot/dispatch                    Gemini + Google Search grounding
+POST   /api/autopilot/dispatch                    (legacy) Gemini reasoning-only
+
+# Lead Discovery pipeline (primary)
+POST   /api/leads/search                          Google Places search (real businesses)
+POST   /api/business/analyze                      Firecrawl per business (real scrape)
+POST   /api/email/generate                        Gemini reasoning-only per business
+POST   /api/campaign/create                       New campaign wrapping N businesses
+POST   /api/campaign/:id/send                     Amazon SES batch send
+POST   /api/campaign/:id/pause                    Pause queued sends
+POST   /api/campaign/:id/resume                   Resume queued sends
+POST   /api/campaign/:id/cancel                   Cancel remaining sends
+GET    /api/campaign/:id                          Campaign + all emails
+GET    /api/campaign/:id/stats                    Delivery counters
 
 GET    /api/queue
 POST   /api/queue/:id/retry
@@ -476,6 +536,30 @@ psql -U postgres -d outbound_ai -c "SELECT id,name,status FROM campaigns;"
 | `npm run db:reset` says "in use"                   | Stop `npm run dev` first (holds pool connections)                 |
 
 ---
+
+## External services — setup required for full pipeline
+
+Everything below has to be provisioned by the account owner outside this repo.
+
+**Google Cloud project (Places API):**
+1. Open https://console.developers.google.com/apis/api/places.googleapis.com/overview
+2. Enable the **Places API (New)**. Wait ~2 minutes for propagation.
+3. `POST /api/leads/search` returns Google's guidance URL if this step is skipped.
+
+**Gemini AI Studio (billing):**
+1. Free-tier keys can hit `RESOURCE_EXHAUSTED` when `prepayment credits are depleted`.
+2. Enable billing on the project at https://ai.studio/projects.
+3. Alternatively, wait ~24h for the daily bucket to reset (limited paths).
+
+**AWS SES (identity + IAM):**
+1. Verify a sender email or domain in the SES console for `AWS_REGION`.
+2. Set `SES_FROM_EMAIL` in `.env` to the verified address.
+3. Ensure the IAM user carrying `AWS_ACCESS_KEY_ID` has `ses:SendEmail` for
+   that identity (and, optionally, `ses:SendRawEmail`).
+4. If your account is still in the SES sandbox, only verified destinations
+   will accept mail — request production access to send to arbitrary addresses.
+
+**Firecrawl:** no external setup — the API key alone is enough.
 
 ## Known Issues
 

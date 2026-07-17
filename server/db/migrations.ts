@@ -254,6 +254,114 @@ const STATEMENTS: string[] = [
     new_state       JSONB NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_history_entity ON entity_history (entity_id, changed_at DESC)`,
+
+  // ---- Lead-discovery pipeline tables ----
+
+  // Businesses discovered from Google Places (unique by place_id)
+  `CREATE TABLE IF NOT EXISTS businesses (
+    id                    VARCHAR PRIMARY KEY,
+    place_id              VARCHAR UNIQUE NOT NULL,
+    name                  VARCHAR NOT NULL,
+    address               VARCHAR,
+    latitude              DOUBLE PRECISION,
+    longitude             DOUBLE PRECISION,
+    phone                 VARCHAR,
+    website               VARCHAR,
+    google_maps_url       VARCHAR,
+    google_rating         REAL,
+    google_reviews_count  INTEGER,
+    business_category     VARCHAR,
+    business_types        JSONB,
+    business_status       VARCHAR,
+    source_query          TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_businesses_source_query ON businesses (source_query)`,
+  `CREATE INDEX IF NOT EXISTS idx_businesses_has_website ON businesses ((website IS NOT NULL))`,
+
+  // Enriched profile per business (Firecrawl + light AI structuring)
+  `CREATE TABLE IF NOT EXISTS business_profiles (
+    id                        VARCHAR PRIMARY KEY,
+    business_id               VARCHAR NOT NULL UNIQUE REFERENCES businesses(id) ON DELETE CASCADE,
+    raw_scraped_markdown      TEXT,
+    extracted_description     TEXT,
+    extracted_services        JSONB,
+    extracted_products        JSONB,
+    extracted_industry        VARCHAR,
+    extracted_about_us        TEXT,
+    extracted_technologies    JSONB,
+    extracted_company_size    VARCHAR,
+    extracted_social_links    JSONB,
+    extracted_emails          JSONB,
+    extracted_phones          JSONB,
+    firecrawl_status          VARCHAR NOT NULL DEFAULT 'PENDING',
+    firecrawl_error           TEXT,
+    scraped_at                TIMESTAMPTZ,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
+  // Places API query cache (dedup by hash of normalized query+city+page_token)
+  `CREATE TABLE IF NOT EXISTS google_places_cache (
+    id            VARCHAR PRIMARY KEY,
+    query_hash    VARCHAR UNIQUE NOT NULL,
+    query         TEXT NOT NULL,
+    city          VARCHAR,
+    page_token    VARCHAR,
+    response_json JSONB NOT NULL,
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
+  // Firecrawl scrape cache (dedup by URL hash)
+  `CREATE TABLE IF NOT EXISTS firecrawl_cache (
+    id            VARCHAR PRIMARY KEY,
+    url_hash      VARCHAR UNIQUE NOT NULL,
+    url           VARCHAR NOT NULL,
+    response_json JSONB NOT NULL,
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
+  // Generated emails ready to send (or already sent)
+  `CREATE TABLE IF NOT EXISTS emails (
+    id                VARCHAR PRIMARY KEY,
+    campaign_id       VARCHAR REFERENCES campaigns(id) ON DELETE CASCADE,
+    business_id       VARCHAR REFERENCES businesses(id) ON DELETE SET NULL,
+    lead_id           VARCHAR REFERENCES leads(id) ON DELETE SET NULL,
+    to_email          VARCHAR NOT NULL,
+    from_email        VARCHAR,
+    subject           TEXT NOT NULL,
+    body_text         TEXT NOT NULL,
+    body_html         TEXT,
+    opening_line      TEXT,
+    pain_points       JSONB,
+    benefits          JSONB,
+    cta               TEXT,
+    confidence_score  REAL,
+    email_tone        VARCHAR,
+    status            VARCHAR NOT NULL DEFAULT 'READY',
+    provider          VARCHAR,
+    message_id        VARCHAR,
+    error_message     TEXT,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    scheduled_at      TIMESTAMPTZ,
+    sent_at           TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_campaign ON emails (campaign_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_status ON emails (status)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_business ON emails (business_id)`,
+
+  // Delivery events (SES bounce/complaint webhooks land here in Phase 2)
+  `CREATE TABLE IF NOT EXISTS email_events (
+    id           VARCHAR PRIMARY KEY,
+    email_id     VARCHAR REFERENCES emails(id) ON DELETE CASCADE,
+    event_type   VARCHAR NOT NULL,
+    raw_payload  JSONB,
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_email_events_email ON email_events (email_id, occurred_at DESC)`,
 ];
 
 export async function runMigrations(): Promise<void> {

@@ -11,6 +11,7 @@ import { SmtpController } from "../controllers/smtp.controller";
 import { SystemController } from "../controllers/system.controller";
 import { BillingController } from "../controllers/billing.controller";
 import { SyncController } from "../controllers/sync.controller";
+import { LeadDiscoveryController } from "../controllers/leadDiscovery.controller";
 import { authenticateJwt, requireRole } from "../middleware/auth.middleware";
 import { rateLimiter } from "../middleware/rateLimiter.middleware";
 import { csrfProtection } from "../middleware/csrf.middleware";
@@ -142,6 +143,18 @@ router.delete("/queue/failed/all", authenticateJwt, SystemController.clearFailed
 // Task Automation Handlers
 router.post("/automation/trigger", authenticateJwt, SystemController.triggerAutomationTask);
 router.post("/autopilot/dispatch", authenticateJwt, SystemController.dispatchAutopilotSearch);
+
+// --- LEAD DISCOVERY PIPELINE (Places → Firecrawl → Gemini reasoning → SES) ---
+router.post("/leads/search", authenticateJwt, LeadDiscoveryController.search);
+router.post("/business/analyze", authenticateJwt, LeadDiscoveryController.analyze);
+router.post("/email/generate", authenticateJwt, LeadDiscoveryController.generate);
+router.post("/campaign/create", authenticateJwt, LeadDiscoveryController.createCampaign);
+router.post("/campaign/:id/send", authenticateJwt, LeadDiscoveryController.send);
+router.post("/campaign/:id/pause", authenticateJwt, LeadDiscoveryController.pause);
+router.post("/campaign/:id/resume", authenticateJwt, LeadDiscoveryController.resume);
+router.post("/campaign/:id/cancel", authenticateJwt, LeadDiscoveryController.cancel);
+router.get("/campaign/:id", authenticateJwt, LeadDiscoveryController.getCampaign);
+router.get("/campaign/:id/stats", authenticateJwt, LeadDiscoveryController.getCampaignStats);
 
 // --- BILLING & SUBSCRIPTIONS ---
 router.post("/billing/checkout", authenticateJwt, BillingController.createCheckoutSession);

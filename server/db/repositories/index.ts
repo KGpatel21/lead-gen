@@ -18,3 +18,12 @@ export { queueRepository } from "./queue.repository";
 export { auditRepository } from "./audit.repository";
 export { agentRepository, DEFAULT_AGENTS } from "./agent.repository";
 export { historyRepository } from "./history.repository";
+
+// Lead-discovery pipeline
+export { businessRepository } from "./business.repository";
+export type { Business, UpsertBusinessInput } from "./business.repository";
+export { businessProfileRepository } from "./businessProfile.repository";
+export type { BusinessProfile, FirecrawlStatus, UpsertProfileInput } from "./businessProfile.repository";
+export { placesCacheRepository, firecrawlCacheRepository } from "./cache.repository";
+export { emailRepository, emailEventRepository } from "./email.repository";
+export type { Email, EmailStatus, CreateEmailInput } from "./email.repository";
