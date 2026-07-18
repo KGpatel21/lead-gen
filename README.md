@@ -198,7 +198,7 @@ observed via Prometheus-format `/metrics`.
 | Frontend         | React 19, Vite 6, TailwindCSS 4                    |
 | Database         | PostgreSQL 15+ (native `pg` driver, `pg.Pool`)     |
 | Cache & queue    | Redis (ioredis)                                    |
-| Email dispatch   | Nodemailer                                         |
+| Email provider   | Pluggable via `EmailProvider` interface. Supports Amazon SES, generic SMTP (Zoho, Titan, GoDaddy, Fastmail, Hostinger, Namecheap, cPanel, Gmail SMTP, Outlook SMTP, Yahoo, Proton Bridge, …), Gmail OAuth, Outlook OAuth. Add new providers under `server/providers/email/`. |
 | AI provider      | Pluggable via `AIProvider` interface. Default: Groq `llama-3.3-70b-versatile`. Fallback: Gemini. Add new providers under `server/ai/providers/`. |
 | Billing          | Stripe                                             |
 | Realtime         | `ws` WebSocket server (path `/ws`)                 |

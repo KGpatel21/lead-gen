@@ -12,7 +12,9 @@ import { SystemController } from "../controllers/system.controller";
 import { BillingController } from "../controllers/billing.controller";
 import { SyncController } from "../controllers/sync.controller";
 import { LeadDiscoveryController } from "../controllers/leadDiscovery.controller";
-import { SenderIdentityController } from "../controllers/senderIdentity.controller";
+import { EmailAccountController } from "../controllers/emailAccount.controller";
+import { SenderPoolController } from "../controllers/senderPool.controller";
+import { OAuthController } from "../controllers/oauth.controller";
 import { SuppressionController } from "../controllers/suppression.controller";
 import { FollowUpController } from "../controllers/followUp.controller";
 import { TemplatesController } from "../controllers/templates.controller";
@@ -161,12 +163,38 @@ router.get("/campaign/:id", authenticateJwt, LeadDiscoveryController.getCampaign
 router.get("/campaign/:id/stats", authenticateJwt, LeadDiscoveryController.getCampaignStats);
 router.get("/queue/email/stats", authenticateJwt, LeadDiscoveryController.queueStats);
 
-// --- SENDER IDENTITIES (Phase 3) ---
-router.get("/sender-identities", authenticateJwt, SenderIdentityController.list);
-router.post("/sender-identities", authenticateJwt, SenderIdentityController.create);
-router.post("/sender-identities/:id/refresh", authenticateJwt, SenderIdentityController.refresh);
-router.post("/sender-identities/:id/active", authenticateJwt, SenderIdentityController.setActive);
-router.delete("/sender-identities/:id", authenticateJwt, SenderIdentityController.delete);
+// --- EMAIL ACCOUNTS (Phase 4 — unified across SES, SMTP, Gmail OAuth, Outlook OAuth) ---
+router.get("/email-accounts", authenticateJwt, EmailAccountController.list);
+router.get("/email-accounts/presets", authenticateJwt, EmailAccountController.presets);
+router.post("/email-accounts", authenticateJwt, EmailAccountController.create);
+router.put("/email-accounts/:id", authenticateJwt, EmailAccountController.update);
+router.post("/email-accounts/:id/test", authenticateJwt, EmailAccountController.test);
+router.post("/email-accounts/:id/active", authenticateJwt, EmailAccountController.setActive);
+router.post("/email-accounts/:id/reconnect", authenticateJwt, EmailAccountController.reconnect);
+router.delete("/email-accounts/:id", authenticateJwt, EmailAccountController.delete);
+
+// Backward-compatible alias for Phase 3 clients: sender-identities is a subset
+// of email-accounts. Both paths route to the same controller.
+router.get("/sender-identities", authenticateJwt, EmailAccountController.list);
+router.post("/sender-identities", authenticateJwt, EmailAccountController.create);
+router.post("/sender-identities/:id/active", authenticateJwt, EmailAccountController.setActive);
+router.delete("/sender-identities/:id", authenticateJwt, EmailAccountController.delete);
+
+// --- SENDER POOLS (Phase 4) ---
+router.get("/sender-pools", authenticateJwt, SenderPoolController.list);
+router.get("/sender-pools/:id", authenticateJwt, SenderPoolController.get);
+router.post("/sender-pools", authenticateJwt, SenderPoolController.create);
+router.put("/sender-pools/:id", authenticateJwt, SenderPoolController.update);
+router.delete("/sender-pools/:id", authenticateJwt, SenderPoolController.delete);
+router.post("/sender-pools/:id/members", authenticateJwt, SenderPoolController.addMember);
+router.delete("/sender-pools/:id/members/:accountId", authenticateJwt, SenderPoolController.removeMember);
+router.post("/sender-pools/bind-campaign", authenticateJwt, SenderPoolController.bindToCampaign);
+
+// --- OAUTH (Phase 4) ---
+router.get("/oauth/google/start", authenticateJwt, OAuthController.googleStart);
+router.get("/oauth/google/callback", OAuthController.googleCallback);
+router.get("/oauth/microsoft/start", authenticateJwt, OAuthController.microsoftStart);
+router.get("/oauth/microsoft/callback", OAuthController.microsoftCallback);
 
 // --- SUPPRESSION LIST (Phase 3) ---
 router.get("/suppressions", authenticateJwt, SuppressionController.list);

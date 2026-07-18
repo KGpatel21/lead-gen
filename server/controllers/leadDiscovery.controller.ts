@@ -15,8 +15,8 @@ import {
 } from "../db/repositories";
 import { placesService, PlacesNotConfiguredError } from "../services/places.service";
 import { firecrawlService, FirecrawlNotConfiguredError } from "../services/firecrawl.service";
-import { sesService, SesNotConfiguredError } from "../services/ses.service";
 import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
+import { config } from "../config";
 import { enqueueCampaign, pauseCampaign, resumeCampaign, cancelCampaign, queueStats } from "../queues/emailQueue";
 import { followUpRuleRepository } from "../db/repositories";
 import { logAudit } from "../services/db.service";
@@ -27,7 +27,6 @@ function apiError(res: Response, err: unknown) {
   const anyErr = err as any;
   if (err instanceof PlacesNotConfiguredError
    || err instanceof FirecrawlNotConfiguredError
-   || err instanceof SesNotConfiguredError
    || err instanceof GeminiNotConfiguredError) {
     res.status((err as any).httpStatus || 503).json({ success: false, error: (err as Error).message });
     return;
@@ -293,10 +292,13 @@ export class LeadDiscoveryController {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-    if (!sesService.isConfigured()) {
+    // Provider-neutral: any account (SES, SMTP, Gmail OAuth, Outlook OAuth)
+    // is fine — emailDispatch picks the right one per send. At least one
+    // provider's credentials must be present at boot time.
+    if (!config.awsAccessKeyId && !config.googleClientId && !config.microsoftClientId) {
       res.status(503).json({
         success: false,
-        error: "SES not configured (need AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).",
+        error: "No email provider is available. Add SES creds, Google OAuth, Microsoft OAuth, or a generic SMTP account.",
       });
       return;
     }

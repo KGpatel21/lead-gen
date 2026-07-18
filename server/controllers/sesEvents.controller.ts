@@ -17,8 +17,8 @@ import {
   emailRepository,
   emailEventRepository,
   suppressionRepository,
-  senderIdentityRepository,
 } from "../db/repositories";
+import { emailAccountRepository } from "../db/repositories/emailAccount.repository";
 
 const validator = new MessageValidator();
 
@@ -154,7 +154,7 @@ export class SesEventsController {
           eventType: "bounce",
           rawPayload: payload.bounce,
         });
-        if (senderId) await senderIdentityRepository.recordBounce(senderId, permanent);
+        if (senderId) await emailAccountRepository.recordBounce(senderId, permanent);
         // Suppress permanent bounces so we never retry.
         if (permanent) {
           const recipients = payload.bounce?.bouncedRecipients || [];
@@ -181,7 +181,7 @@ export class SesEventsController {
           eventType: "complaint",
           rawPayload: payload.complaint,
         });
-        if (senderId) await senderIdentityRepository.recordComplaint(senderId);
+        if (senderId) await emailAccountRepository.recordComplaint(senderId);
         const recipients = payload.complaint?.complainedRecipients || [];
         for (const r of recipients) {
           if (r.emailAddress) {
@@ -203,7 +203,7 @@ export class SesEventsController {
           eventType: "delivery",
           rawPayload: payload.delivery,
         });
-        if (senderId) await senderIdentityRepository.recordDelivery(senderId);
+        if (senderId) await emailAccountRepository.recordDelivery(senderId);
         break;
       }
       case "reject":

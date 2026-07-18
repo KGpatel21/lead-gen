@@ -28,14 +28,17 @@ export { placesCacheRepository, firecrawlCacheRepository } from "./cache.reposit
 export { emailRepository, emailEventRepository } from "./email.repository";
 export type { Email, EmailStatus, CreateEmailInput } from "./email.repository";
 
-// Phase 3
-export { senderIdentityRepository } from "./senderIdentity.repository";
+// Phase 3 → Phase 4 unified email accounts
+export { emailAccountRepository } from "./emailAccount.repository";
 export type {
-  SenderIdentity,
-  CreateSenderIdentityInput,
-  SesIdentityType,
-  SesVerificationStatus,
-} from "./senderIdentity.repository";
+  EmailAccount,
+  CreateEmailAccountInput,
+  EmailAccountPatch,
+  ProviderKind,
+  ProviderCategory,
+} from "./emailAccount.repository";
+export { senderPoolRepository } from "./senderPool.repository";
+export type { SenderPool, SenderPoolMember, PoolStrategy } from "./senderPool.repository";
 export { suppressionRepository } from "./suppression.repository";
 export type { Suppression, AddSuppressionInput, SuppressionReason } from "./suppression.repository";
 export { followUpRuleRepository } from "./followUp.repository";

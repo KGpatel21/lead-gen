@@ -365,8 +365,19 @@ const STATEMENTS: string[] = [
 
   // ---- Phase 3: production email infrastructure ----
 
-  // Verified SES sender identities (rotation pool)
-  `CREATE TABLE IF NOT EXISTS sender_identities (
+  // Phase 4 unified email accounts.
+  // Legacy rename FIRST — if `sender_identities` exists but `email_accounts`
+  // does not, transparently rename so every following statement targets the
+  // canonical name and preserves any Phase-3 rows + FKs.
+  `DO $do$
+   BEGIN
+     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='sender_identities' AND table_schema='public')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='email_accounts' AND table_schema='public') THEN
+       ALTER TABLE sender_identities RENAME TO email_accounts;
+     END IF;
+   END $do$;`,
+  // If neither table existed yet, create email_accounts fresh.
+  `CREATE TABLE IF NOT EXISTS email_accounts (
     id                       VARCHAR PRIMARY KEY,
     email                    VARCHAR NOT NULL,
     display_name             VARCHAR,
@@ -388,11 +399,86 @@ const STATEMENTS: string[] = [
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at               TIMESTAMPTZ
   )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_identities_email_active
-     ON sender_identities (LOWER(email)) WHERE deleted_at IS NULL`,
-  `CREATE INDEX IF NOT EXISTS idx_sender_identities_rotation
-     ON sender_identities (is_active, is_healthy, last_used_at NULLS FIRST)
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_email_accounts_email_active
+     ON email_accounts (LOWER(email)) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_email_accounts_rotation
+     ON email_accounts (is_active, is_healthy, last_used_at NULLS FIRST)
      WHERE deleted_at IS NULL`,
+
+  // Phase 4: universal provider columns (encrypted credentials + OAuth state).
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS provider VARCHAR NOT NULL DEFAULT 'ses'`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS provider_kind VARCHAR NOT NULL DEFAULT 'transactional'`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_host VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_port INTEGER`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_secure BOOLEAN`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_username VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_password_encrypted TEXT`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS oauth_provider_user_id VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS oauth_scopes VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS oauth_access_token_encrypted TEXT`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS oauth_refresh_token_encrypted TEXT`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS oauth_access_token_expires_at TIMESTAMPTZ`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_host VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_port INTEGER`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_secure BOOLEAN`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_username VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS warmup_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS warmup_status VARCHAR`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_provider_latency_ms INTEGER`,
+  `CREATE INDEX IF NOT EXISTS idx_email_accounts_provider
+     ON email_accounts (provider) WHERE deleted_at IS NULL`,
+
+  // Legacy FK: emails.sender_identity_id — retarget to email_accounts.
+  // We use DEFERRABLE so an in-flight transaction never blocks migrations.
+  `DO $do$
+   BEGIN
+     IF EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_name='email_accounts' AND table_schema='public') THEN
+       IF EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name='emails' AND column_name='sender_identity_id') THEN
+         BEGIN
+           ALTER TABLE emails
+             DROP CONSTRAINT IF EXISTS emails_sender_identity_id_fkey;
+         EXCEPTION WHEN OTHERS THEN
+           NULL;
+         END;
+         BEGIN
+           ALTER TABLE emails
+             ADD CONSTRAINT emails_sender_identity_id_fkey
+             FOREIGN KEY (sender_identity_id) REFERENCES email_accounts(id) ON DELETE SET NULL;
+         EXCEPTION WHEN duplicate_object THEN
+           NULL;
+         END;
+       END IF;
+     END IF;
+   END $do$;`,
+
+  // Phase 4: sender pools + membership (per-campaign or reusable).
+  `CREATE TABLE IF NOT EXISTS sender_pools (
+    id            VARCHAR PRIMARY KEY,
+    name          VARCHAR NOT NULL,
+    strategy      VARCHAR NOT NULL DEFAULT 'round_robin',
+    campaign_id   VARCHAR REFERENCES campaigns(id) ON DELETE CASCADE,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+  )`,
+  `CREATE TABLE IF NOT EXISTS sender_pool_members (
+    id            VARCHAR PRIMARY KEY,
+    pool_id       VARCHAR NOT NULL REFERENCES sender_pools(id) ON DELETE CASCADE,
+    account_id    VARCHAR NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
+    weight        INTEGER NOT NULL DEFAULT 1,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_pool_members
+     ON sender_pool_members (pool_id, account_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_sender_pools_campaign ON sender_pools (campaign_id) WHERE deleted_at IS NULL`,
+
+  // Campaigns can bind to a sender pool (else fall back to round-robin over
+  // all active accounts).
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sender_pool_id VARCHAR REFERENCES sender_pools(id) ON DELETE SET NULL`,
 
   // Permanent suppression list (bounce / complaint / unsubscribe / manual)
   `CREATE TABLE IF NOT EXISTS email_suppressions (
