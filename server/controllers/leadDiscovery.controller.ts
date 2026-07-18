@@ -222,7 +222,10 @@ export class LeadDiscoveryController {
         tone: typeof tone === "string" ? (tone as any) : undefined,
       });
 
+      const workspaceId = (req as any).workspaceId as string | undefined;
+      if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
       const email = await emailRepository.create({
+        workspaceId,
         campaignId: typeof campaignId === "string" && campaignId ? campaignId : undefined,
         businessId,
         toEmail: resolvedTo || "",
@@ -235,7 +238,7 @@ export class LeadDiscoveryController {
         cta: generated.cta,
         confidenceScore: generated.confidenceScore,
         emailTone: generated.emailTone,
-        status: resolvedTo ? "READY" : "PENDING", // PENDING when no destination is on file
+        status: resolvedTo ? "READY" : "PENDING",
       });
 
       res.status(201).json({ success: true, email, business });
@@ -264,7 +267,10 @@ export class LeadDiscoveryController {
       res.status(400).json({ success: false, error: "No matching businesses." });
       return;
     }
+    const workspaceId = (req as any).workspaceId as string | undefined;
+    if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
     const campaign = await campaignRepository.create({
+      workspaceId,
       name: name.trim(),
       status: CampaignStatus.DRAFT,
       subjectTemplate: `Quick question about {{company}}`,

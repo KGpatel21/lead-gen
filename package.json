@@ -28,6 +28,8 @@
     "motion": "^12.23.24",
     "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "sns-validator": "^0.3.5",

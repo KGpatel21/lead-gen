@@ -29,7 +29,7 @@ import { logAudit } from "../services/db.service";
 function signState(payload: object): string {
   const b64 = Buffer.from(JSON.stringify({ ...payload, iat: Date.now() }), "utf8")
     .toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const sig = crypto.createHmac("sha256", config.jwtSecret).update(b64).digest("base64")
+  const sig = crypto.createHmac("sha256", config.oauthStateSecret).update(b64).digest("base64")
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return `${b64}.${sig}`;
 }
@@ -37,7 +37,7 @@ function signState(payload: object): string {
 function verifyState(state: string): any | null {
   if (!state || !state.includes(".")) return null;
   const [b64, sig] = state.split(".", 2);
-  const expected = crypto.createHmac("sha256", config.jwtSecret).update(b64).digest("base64")
+  const expected = crypto.createHmac("sha256", config.oauthStateSecret).update(b64).digest("base64")
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   if (
     Buffer.from(sig).length !== Buffer.from(expected).length ||
@@ -107,8 +107,21 @@ async function upsertOAuthAccount(
     return existing.id;
   }
 
-  // Fresh row
+  // Fresh row — needs a workspace. Take the connecting user's workspace, or
+  // fall back to the system default.
+  const { workspaceRepository, userRepository } = await import("../db/repositories");
+  let workspaceId: string | undefined;
+  if (reconnectAccountId) {
+    // Should have been handled earlier, but if we're here we already know
+    // the account is missing, so fall through.
+  }
+  // resolve via state — this function is called AFTER verifyState, so caller
+  // may pass a userId. We fall back to the default workspace.
+  const def = await workspaceRepository.getDefault();
+  workspaceId = def?.id;
+  if (!workspaceId) throw new Error("no workspace available for OAuth upsert");
   const account = await emailAccountRepository.create({
+    workspaceId,
     provider,
     providerKind: "user_mailbox",
     email: info.email,

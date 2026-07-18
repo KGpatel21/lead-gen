@@ -14,6 +14,7 @@ export interface DbUser {
   role: SecurityRole;
   passwordHash: string;
   passwordSalt: string;
+  workspaceId?: string;
   createdAt: string;
   deletedAt?: string;
   subscriptionPlan?: string;

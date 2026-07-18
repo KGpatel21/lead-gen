@@ -40,7 +40,11 @@ export const followUpWorker = new Worker<FollowUpJobData>(
       return { skipped: `campaign status=${campaign.status}` };
     }
 
-    if (await suppressionRepository.isSuppressed(data.recipientEmail)) {
+    // We know the workspace from the campaign row (or from the initial email row).
+    const initialEmail = await emailRepository.findById(data.initialEmailId);
+    const workspaceId = initialEmail?.workspaceId || (campaign as any).workspaceId;
+    if (!workspaceId) return { skipped: "no workspace" };
+    if (await suppressionRepository.isSuppressed(data.recipientEmail, workspaceId)) {
       return { skipped: "recipient suppressed" };
     }
 
@@ -72,6 +76,7 @@ export const followUpWorker = new Worker<FollowUpJobData>(
         : composed.subject;
 
     const row = await emailRepository.create({
+      workspaceId,
       campaignId: data.campaignId,
       businessId: data.businessId,
       toEmail: data.recipientEmail,

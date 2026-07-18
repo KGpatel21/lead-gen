@@ -19,10 +19,17 @@ import { SuppressionController } from "../controllers/suppression.controller";
 import { FollowUpController } from "../controllers/followUp.controller";
 import { TemplatesController } from "../controllers/templates.controller";
 import { authenticateJwt, requireRole } from "../middleware/auth.middleware";
+import { workspaceContextMiddleware } from "../middleware/workspaceContext.middleware";
 import { rateLimiter } from "../middleware/rateLimiter.middleware";
 import { csrfProtection } from "../middleware/csrf.middleware";
 import { validatePayload } from "../middleware/validation.middleware";
 import { SecurityRole } from "../../src/types";
+
+/**
+ * Convenience: middleware chain that requires an authenticated request AND
+ * populates req.workspaceId. Every user-data endpoint uses this pair.
+ */
+const authWithWorkspace = [authenticateJwt, workspaceContextMiddleware] as any[];
 
 const router = Router();
 

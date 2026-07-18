@@ -543,6 +543,111 @@ const STATEMENTS: string[] = [
   `ALTER TABLE templates ADD COLUMN IF NOT EXISTS variables JSONB NOT NULL DEFAULT '[]'::jsonb`,
   `ALTER TABLE templates ADD COLUMN IF NOT EXISTS current_version INTEGER NOT NULL DEFAULT 1`,
   `ALTER TABLE templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+
+  // ================================================================
+  // Phase 3.5 hardening: multi-tenancy, idempotency, encryption tag.
+  // ================================================================
+
+  // Workspaces: every user & every user-data row belongs to exactly one.
+  `CREATE TABLE IF NOT EXISTS workspaces (
+    id            VARCHAR PRIMARY KEY,
+    name          VARCHAR NOT NULL,
+    slug          VARCHAR NOT NULL,
+    owner_user_id VARCHAR,
+    is_default    BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_workspaces_slug ON workspaces (LOWER(slug))`,
+
+  // Membership join for future multi-user workspaces. Today = 1 user per row.
+  `CREATE TABLE IF NOT EXISTS workspace_members (
+    id           VARCHAR PRIMARY KEY,
+    workspace_id VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id      VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role         VARCHAR NOT NULL DEFAULT 'MEMBER',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_members ON workspace_members (workspace_id, user_id)`,
+
+  // Add workspace_id + FK to every user-data table (idempotent).
+  `ALTER TABLE users        ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE SET NULL`,
+  `ALTER TABLE team_members ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE campaigns    ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE leads        ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE smtp_accounts ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE domains      ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE templates    ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE replies      ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE emails       ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE email_suppressions ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE sender_pools ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE businesses   ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+  `ALTER TABLE follow_up_rules ADD COLUMN IF NOT EXISTS workspace_id VARCHAR REFERENCES workspaces(id) ON DELETE CASCADE`,
+
+  // Bootstrap + backfill: create default workspace, assign every legacy row.
+  `DO $do$
+   DECLARE
+     default_ws_id VARCHAR;
+   BEGIN
+     SELECT id INTO default_ws_id FROM workspaces WHERE is_default = TRUE LIMIT 1;
+     IF default_ws_id IS NULL THEN
+       default_ws_id := 'ws-default-' || substr(md5(random()::text), 1, 8);
+       INSERT INTO workspaces (id, name, slug, is_default)
+       VALUES (default_ws_id, 'Default Workspace', 'default', TRUE);
+     END IF;
+     INSERT INTO workspace_members (id, workspace_id, user_id, role)
+     SELECT 'wm-' || u.id, default_ws_id, u.id, u.role
+       FROM users u
+     ON CONFLICT (workspace_id, user_id) DO NOTHING;
+     UPDATE users             SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE team_members      SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE campaigns         SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE leads             SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE smtp_accounts     SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE domains           SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE templates         SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE replies           SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE emails            SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE email_accounts    SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE email_suppressions SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE sender_pools      SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE businesses        SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+     UPDATE follow_up_rules   SET workspace_id = default_ws_id WHERE workspace_id IS NULL;
+   END $do$;`,
+
+  // Composite indexes for workspace-scoped queries.
+  `CREATE INDEX IF NOT EXISTS idx_campaigns_workspace       ON campaigns (workspace_id)       WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_leads_workspace           ON leads (workspace_id)           WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_templates_workspace       ON templates (workspace_id)       WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_email_accounts_workspace  ON email_accounts (workspace_id)  WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_email_suppressions_workspace ON email_suppressions (workspace_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_workspace_status   ON emails (workspace_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_campaign_status    ON emails (campaign_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_sender_pools_workspace    ON sender_pools (workspace_id)    WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_businesses_workspace      ON businesses (workspace_id)`,
+
+  // Suppression uniqueness moves to (workspace_id, LOWER(email)).
+  `DROP INDEX IF EXISTS uq_email_suppressions_email`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_email_suppressions_ws_email
+     ON email_suppressions (workspace_id, LOWER(email))`,
+
+  // Idempotency: SNS may deliver the same message twice. A unique index
+  // over (email_id, event_type, sns_message_id) enforces once-only apply.
+  `ALTER TABLE email_events ADD COLUMN IF NOT EXISTS sns_message_id VARCHAR`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_email_events_dedupe
+     ON email_events (email_id, event_type, sns_message_id)
+     WHERE sns_message_id IS NOT NULL`,
+
+  // Encryption key rotation: every AES ciphertext tags its key_id.
+  `ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS encryption_key_id VARCHAR`,
+  `ALTER TABLE smtp_accounts  ADD COLUMN IF NOT EXISTS encryption_key_id VARCHAR`,
+
+  // Tracking: flag opens that came from Gmail / Apple MPP image proxy so
+  // dashboards can show true opens vs prefetches.
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS first_open_user_agent VARCHAR`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS open_from_proxy BOOLEAN NOT NULL DEFAULT FALSE`,
 ];
 
 export async function runMigrations(): Promise<void> {

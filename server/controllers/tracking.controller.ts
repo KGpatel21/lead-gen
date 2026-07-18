@@ -2,9 +2,15 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Open pixel, click redirect, and unsubscribe endpoints. These are the
- * only unauthenticated /api-adjacent routes the app exposes (they're mounted
- * outside /api because email clients hit them directly).
+ * Open pixel, click redirect, and unsubscribe endpoints. Public — email
+ * clients hit them directly, so authentication is impossible.
+ *
+ * Phase 3.5 hardening:
+ *   - Tokens carry an expiry (90 days) and are rejected past it. Enforced
+ *     inside trackingService.verifyToken.
+ *   - Open pixel flags Gmail / Apple Mail Privacy Protection image-proxy
+ *     prefetches so dashboards can distinguish real opens from prefetches.
+ *   - All HTML responses set a strict Content-Security-Policy.
  */
 
 import { Request, Response } from "express";
@@ -14,6 +20,8 @@ import {
   emailEventRepository,
   suppressionRepository,
 } from "../db/repositories";
+import { suppressionCacheService } from "../services/suppressionCache.service";
+import { log } from "../observability/logger";
 
 // 1×1 transparent GIF
 const PIXEL = Buffer.from(
@@ -21,36 +29,71 @@ const PIXEL = Buffer.from(
   "base64"
 );
 
+// Well-known email-client image proxies. When these fetch our pixel we flag
+// the open as `open_from_proxy = true` — the campaign dashboard can then
+// discount prefetch opens from real opens.
+const IMAGE_PROXY_UA_PATTERNS = [
+  /GoogleImageProxy/i,
+  /YahooMailProxy/i,
+  /ymlp\.com/i,
+  /Superhuman/i,
+];
+
+// Apple Mail Privacy Protection loads the pixel via a Mask iCloud relay
+// with a specific UA. Detect and flag.
+const APPLE_MPP_UA_PATTERNS = [/applewebkit.*mobile.*mail/i, /Applebot/i, /Apple-CFNetwork/i];
+
+function detectProxy(userAgent: string | undefined): boolean {
+  if (!userAgent) return false;
+  return (
+    IMAGE_PROXY_UA_PATTERNS.some((re) => re.test(userAgent)) ||
+    APPLE_MPP_UA_PATTERNS.some((re) => re.test(userAgent))
+  );
+}
+
+const HTML_CSP =
+  "default-src 'none'; " +
+  "style-src 'unsafe-inline'; " +
+  "img-src 'self' data:; " +
+  "form-action 'self'; " +
+  "frame-ancestors 'none'; " +
+  "base-uri 'none';";
+
+function setHtmlSecurityHeaders(res: Response): void {
+  res.setHeader("Content-Security-Policy", HTML_CSP);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+}
+
 export class TrackingController {
-  /**
-   * GET /t/o/:token — records an open and returns a 1×1 pixel.
-   */
   public static async open(req: Request, res: Response): Promise<void> {
     const verified = trackingService.verifyToken(req.params.token || "");
     if (verified && verified.kind === "open") {
+      const userAgent = req.get("user-agent") || undefined;
+      const fromProxy = detectProxy(userAgent);
       try {
-        await emailRepository.recordOpen(verified.emailId);
+        await emailRepository.recordOpen(verified.emailId, { userAgent, fromProxy });
         await emailEventRepository.log({
           emailId: verified.emailId,
-          eventType: "open",
-          rawPayload: { ua: req.get("user-agent") || null, ip: req.ip },
+          eventType: fromProxy ? "open_prefetch" : "open",
+          rawPayload: { ua: userAgent || null, ip: req.ip, ageSec: verified.ageSec, fromProxy },
         });
       } catch (err) {
-        console.warn("[tracking] open record failed:", (err as Error).message);
+        log.warn({ err: (err as Error).message, emailId: verified.emailId }, "tracking open record failed");
       }
     }
     res.setHeader("Content-Type", "image/gif");
-    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     res.end(PIXEL);
   }
 
-  /**
-   * GET /t/c/:token — records a click and 302-redirects to the original URL.
-   */
   public static async click(req: Request, res: Response): Promise<void> {
     const verified = trackingService.verifyToken(req.params.token || "");
     if (!verified || verified.kind !== "click" || !verified.targetUrl) {
+      setHtmlSecurityHeaders(res);
       res.status(400).send("Invalid tracking link.");
       return;
     }
@@ -59,43 +102,48 @@ export class TrackingController {
       await emailEventRepository.log({
         emailId: verified.emailId,
         eventType: "click",
-        rawPayload: { targetUrl: verified.targetUrl, ua: req.get("user-agent") || null, ip: req.ip },
+        rawPayload: {
+          targetUrl: verified.targetUrl,
+          ua: req.get("user-agent") || null,
+          ip: req.ip,
+          ageSec: verified.ageSec,
+        },
       });
     } catch (err) {
-      console.warn("[tracking] click record failed:", (err as Error).message);
+      log.warn({ err: (err as Error).message, emailId: verified.emailId }, "tracking click record failed");
     }
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.redirect(302, verified.targetUrl);
   }
 
-  /**
-   * GET /unsubscribe/:token — renders confirmation + writes suppression.
-   * Also handles POST for the RFC 8058 one-click header.
-   */
   public static async unsubscribe(req: Request, res: Response): Promise<void> {
+    setHtmlSecurityHeaders(res);
     const verified = trackingService.verifyToken(req.params.token || "");
     if (!verified || verified.kind !== "unsubscribe") {
       res.status(400).type("html").send(errorPage("Invalid unsubscribe link."));
       return;
     }
     const email = await emailRepository.findById(verified.emailId);
-    if (!email || !email.toEmail) {
+    if (!email || !email.toEmail || !email.workspaceId) {
       res.status(404).type("html").send(errorPage("This unsubscribe request has expired."));
       return;
     }
     try {
       await suppressionRepository.add({
+        workspaceId: email.workspaceId,
         email: email.toEmail,
         reason: "unsubscribe",
         source: `list-unsubscribe:${email.id}`,
         campaignId: email.campaignId,
       });
+      await suppressionCacheService.invalidateAdd(email.toEmail, email.workspaceId);
       await emailEventRepository.log({
         emailId: email.id,
         eventType: "unsubscribe",
         rawPayload: { ua: req.get("user-agent") || null, ip: req.ip },
       });
     } catch (err) {
-      console.warn("[unsubscribe] failed to record:", (err as Error).message);
+      log.warn({ err: (err as Error).message, emailId: email.id }, "unsubscribe record failed");
     }
     if (req.method === "POST") {
       res.status(200).send("OK");
@@ -110,8 +158,8 @@ function successPage(email: string): string {
 <html><head><meta charset="utf-8"><title>Unsubscribed</title>
 <style>body{font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:80px auto;padding:0 20px;color:#0f172a}h1{font-size:22px}p{color:#475569;line-height:1.5}</style></head>
 <body><h1>You've been unsubscribed</h1>
-<p><strong>${escapeHtml(email)}</strong> has been added to our suppression list. You won't receive further emails from any of our campaigns.</p>
-<p>If this was a mistake, reply to any prior email and we'll remove you from the suppression list.</p>
+<p><strong>${escapeHtml(email)}</strong> has been added to our suppression list. You will not receive further emails from any of our campaigns.</p>
+<p>If this was a mistake, reply to any prior email and we will remove you from the suppression list.</p>
 </body></html>`;
 }
 function errorPage(message: string): string {

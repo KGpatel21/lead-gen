@@ -33,7 +33,9 @@ export class SenderPoolController {
       res.status(400).json({ success: false, error: `strategy must be one of ${STRATEGIES.join(", ")}` });
       return;
     }
-    const p = await senderPoolRepository.create({ name: name.trim(), strategy, campaignId });
+    const workspaceId = (req as any).workspaceId as string | undefined;
+    if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
+    const p = await senderPoolRepository.create({ workspaceId, name: name.trim(), strategy, campaignId });
     res.status(201).json({ success: true, pool: p });
   }
 

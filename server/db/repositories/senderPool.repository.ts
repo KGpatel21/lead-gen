@@ -50,23 +50,35 @@ function mapMember(r: any): SenderPoolMember {
 }
 
 export const senderPoolRepository = {
-  async list(): Promise<SenderPool[]> {
+  async list(workspaceId?: string): Promise<SenderPool[]> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM sender_pools WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+        [workspaceId]
+      );
+      return r.rows.map(mapPool);
+    }
     const r = await pool.query(
       "SELECT * FROM sender_pools WHERE deleted_at IS NULL ORDER BY created_at DESC"
     );
     return r.rows.map(mapPool);
   },
 
-  async findById(id: string): Promise<SenderPool | null> {
+  async findById(id: string, workspaceId?: string): Promise<SenderPool | null> {
+    if (workspaceId) {
+      const r = await pool.query("SELECT * FROM sender_pools WHERE id = $1 AND workspace_id = $2", [id, workspaceId]);
+      return r.rows[0] ? mapPool(r.rows[0]) : null;
+    }
     const r = await pool.query("SELECT * FROM sender_pools WHERE id = $1", [id]);
     return r.rows[0] ? mapPool(r.rows[0]) : null;
   },
 
-  async create(input: { name: string; strategy?: PoolStrategy; campaignId?: string }): Promise<SenderPool> {
+  async create(input: { workspaceId: string; name: string; strategy?: PoolStrategy; campaignId?: string }): Promise<SenderPool> {
+    if (!input.workspaceId) throw new Error("senderPoolRepository.create requires workspaceId");
     const id = `pool-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const r = await pool.query(
-      `INSERT INTO sender_pools (id, name, strategy, campaign_id) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [id, input.name, input.strategy || "round_robin", input.campaignId || null]
+      `INSERT INTO sender_pools (id, workspace_id, name, strategy, campaign_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [id, input.workspaceId, input.name, input.strategy || "round_robin", input.campaignId || null]
     );
     return mapPool(r.rows[0]);
   },

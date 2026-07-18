@@ -28,12 +28,15 @@ export class CampaignController {
       res.status(400).json({ success: false, error: "Campaign name is required." });
       return;
     }
-    const dupe = await campaignRepository.findByNameActive(name);
+    const workspaceId = (req as any).workspaceId as string | undefined;
+    if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
+    const dupe = await campaignRepository.findByNameActive(name, workspaceId);
     if (dupe) {
       res.status(409).json({ success: false, error: "A campaign with this name already exists." });
       return;
     }
     const campaign = await campaignRepository.create({
+      workspaceId,
       name: name.trim(),
       subjectTemplate: "Quick question regarding {{company}}'s growth engine",
       bodyTemplate:

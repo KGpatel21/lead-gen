@@ -5,7 +5,7 @@
 
 import crypto from "crypto";
 import { Request, Response } from "express";
-import { userRepository, teamRepository } from "../db/repositories";
+import { userRepository, teamRepository, workspaceRepository } from "../db/repositories";
 import { SecurityService } from "../services/security.service";
 import { logAudit } from "../services/db.service";
 import { SecurityRole } from "../../src/types";
@@ -36,19 +36,35 @@ export class AuthController {
       return;
     }
 
-    // First registered user gets ADMIN. Everyone else is USER by default.
+    // First registered user gets ADMIN + inherits the default workspace.
+    // Every subsequent user gets their own fresh workspace so multi-tenant
+    // isolation is enforced from the moment they sign up.
     const userCount = await userRepository.count();
     const role = userCount === 0 ? SecurityRole.ADMIN : SecurityRole.USER;
 
     const salt = SecurityService.newSalt();
     const passwordHash = SecurityService.hashPassword(password, salt);
+
+    let workspaceId: string | undefined;
+    if (userCount === 0) {
+      const def = await workspaceRepository.getDefault();
+      workspaceId = def?.id;
+    }
     const newUser = await userRepository.create({
       name: name.trim(),
       email: email.trim(),
       role,
       passwordHash,
       passwordSalt: salt,
+      workspaceId,
     });
+
+    // For the second-and-onwards user, provision a fresh workspace and
+    // attach them as OWNER.
+    if (userCount > 0) {
+      const ws = await workspaceRepository.createForUser(newUser.id, `${newUser.name}'s Workspace`);
+      workspaceId = ws.id;
+    }
 
     // Mirror into team_members for the roster (best-effort; ignore dupe).
     try {
@@ -60,15 +76,15 @@ export class AuthController {
     await logAudit(`Account registered: ${newUser.email}`, "AUTHENTICATION", {
       userId: newUser.id,
       userEmail: newUser.email,
-      details: `Assigned role: ${role}`,
+      details: `Role: ${role} · Workspace: ${workspaceId}`,
       ipAddress: req.ip,
     });
 
-    const token = SecurityService.generateJwt({ id: newUser.id, email: newUser.email, role });
+    const token = SecurityService.generateJwt({ id: newUser.id, email: newUser.email, role, workspaceId });
     res.status(201).json({
       success: true,
       token,
-      user: { id: newUser.id, name: newUser.name, email: newUser.email, role },
+      user: { id: newUser.id, name: newUser.name, email: newUser.email, role, workspaceId },
     });
   }
 
@@ -89,7 +105,12 @@ export class AuthController {
       return;
     }
 
-    const token = SecurityService.generateJwt({ id: user.id, email: user.email, role: user.role });
+    const token = SecurityService.generateJwt({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      workspaceId: user.workspaceId,
+    });
     await logAudit("User login", "AUTHENTICATION", {
       userId: user.id,
       userEmail: user.email,
@@ -99,7 +120,7 @@ export class AuthController {
     res.json({
       success: true,
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, workspaceId: user.workspaceId },
     });
   }
 

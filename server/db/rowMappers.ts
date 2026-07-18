@@ -37,6 +37,7 @@ export const mapUser = (r: any): DbUser => ({
   role: r.role as SecurityRole,
   passwordHash: r.password_hash,
   passwordSalt: r.password_salt,
+  workspaceId: r.workspace_id || undefined,
   createdAt: iso(r.created_at),
   deletedAt: r.deleted_at ? iso(r.deleted_at) : undefined,
   subscriptionPlan: r.subscription_plan || undefined,

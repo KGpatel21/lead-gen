@@ -15,7 +15,7 @@ import {
 import { SecurityService } from "../services/security.service";
 import { getProviderFor, SMTP_PRESETS } from "../providers/email";
 import { logAudit } from "../services/db.service";
-import { AuthenticatedRequest } from "../middleware/auth.middleware";
+import { WorkspaceScopedRequest } from "../middleware/workspaceContext.middleware";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VALID_PROVIDERS: ProviderKind[] = ["ses", "smtp", "gmail_oauth", "outlook_oauth"];
@@ -31,8 +31,8 @@ function sanitize(account: any) {
 }
 
 export class EmailAccountController {
-  public static async list(_req: Request, res: Response): Promise<void> {
-    const data = await emailAccountRepository.list();
+  public static async list(req: WorkspaceScopedRequest, res: Response): Promise<void> {
+    const data = await emailAccountRepository.list(req.workspaceId);
     res.json({ success: true, data: data.map(sanitize) });
   }
 
@@ -44,7 +44,7 @@ export class EmailAccountController {
    * Create an SES or SMTP account. OAuth (Gmail / Outlook) accounts land
    * through the OAuth controllers instead — they need the browser round-trip.
    */
-  public static async create(req: AuthenticatedRequest, res: Response): Promise<void> {
+  public static async create(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const {
       provider,
       email,
@@ -76,7 +76,7 @@ export class EmailAccountController {
       res.status(400).json({ success: false, error: "valid email required" });
       return;
     }
-    const dupe = await emailAccountRepository.findByEmail(email);
+    const dupe = await emailAccountRepository.findByEmail(email, req.workspaceId);
     if (dupe) { res.status(409).json({ success: false, error: "account exists" }); return; }
 
     if (provider === "smtp") {
@@ -89,7 +89,9 @@ export class EmailAccountController {
       }
     }
 
+    if (!req.workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
     const account = await emailAccountRepository.create({
+      workspaceId: req.workspaceId,
       provider,
       providerKind: provider === "ses" ? "transactional" : "user_mailbox",
       email,
@@ -113,9 +115,9 @@ export class EmailAccountController {
     res.status(201).json({ success: true, account: sanitize(account) });
   }
 
-  public static async update(req: AuthenticatedRequest, res: Response): Promise<void> {
+  public static async update(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const account = await emailAccountRepository.findById(id);
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
     if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
     const patch: any = {};
     const b = req.body || {};
@@ -129,19 +131,19 @@ export class EmailAccountController {
     if (typeof b.smtpPassword === "string" && b.smtpPassword.length > 0) {
       patch.smtpPasswordEncrypted = SecurityService.encryptSecret(b.smtpPassword);
     }
-    const updated = await emailAccountRepository.update(id, patch);
+    const updated = await emailAccountRepository.update(id, patch, req.workspaceId);
     res.json({ success: true, account: sanitize(updated) });
   }
 
-  public static async test(req: AuthenticatedRequest, res: Response): Promise<void> {
+  public static async test(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const account = await emailAccountRepository.findById(id);
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
     if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
     try {
       const provider = getProviderFor(account);
       const result = await provider.test();
       await emailAccountRepository.recordProviderLatency(id, result.latencyMs);
-      await emailAccountRepository.update(id, { isHealthy: result.ok });
+      await emailAccountRepository.update(id, { isHealthy: result.ok }, req.workspaceId);
       res.json({ success: true, test: result });
     } catch (err: any) {
       const message = err?.message || "test failed";
@@ -150,21 +152,21 @@ export class EmailAccountController {
     }
   }
 
-  public static async setActive(req: Request, res: Response): Promise<void> {
+  public static async setActive(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const { id } = req.params;
     const { active } = req.body || {};
     if (typeof active !== "boolean") {
       res.status(400).json({ success: false, error: "active (boolean) required." });
       return;
     }
-    const updated = await emailAccountRepository.update(id, { isActive: active });
+    const updated = await emailAccountRepository.update(id, { isActive: active }, req.workspaceId);
     if (!updated) { res.status(404).json({ success: false, error: "not found" }); return; }
     res.json({ success: true, account: sanitize(updated) });
   }
 
-  public static async reconnect(req: Request, res: Response): Promise<void> {
+  public static async reconnect(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const account = await emailAccountRepository.findById(id);
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
     if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
     if (account.provider === "gmail_oauth" || account.provider === "outlook_oauth") {
       const scheme = account.provider === "gmail_oauth" ? "google" : "microsoft";
@@ -178,18 +180,18 @@ export class EmailAccountController {
     try {
       const provider = getProviderFor(account);
       const result = await provider.test();
-      await emailAccountRepository.update(id, { isHealthy: result.ok, isActive: result.ok });
+      await emailAccountRepository.update(id, { isHealthy: result.ok, isActive: result.ok }, req.workspaceId);
       res.json({ success: true, test: result });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || "reconnect failed" });
     }
   }
 
-  public static async delete(req: Request, res: Response): Promise<void> {
+  public static async delete(req: WorkspaceScopedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const account = await emailAccountRepository.findById(id);
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
     if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
-    await emailAccountRepository.softDelete(id);
+    await emailAccountRepository.softDelete(id, req.workspaceId);
     res.json({ success: true });
   }
 }

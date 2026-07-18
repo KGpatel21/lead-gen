@@ -2,31 +2,30 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Provider-neutral email dispatch orchestrator.
+ * Provider-neutral email dispatcher.
  *
- * Responsibilities:
- *   - Enforce suppression list (before any provider call)
- *   - Pick an account (via sender pool strategy if the campaign has one,
- *     else round-robin over all healthy active accounts)
- *   - Inject unsubscribe footer, tracking pixel, and click rewrite
- *   - Send via `getProviderFor(account)` — never a specific vendor SDK
- *   - Persist SEND / SUPPRESSED / FAILED with sender + provider info
- *   - FAILOVER: on a retriable failure, mark the account unhealthy and
- *     try the next eligible account (up to 3 accounts per send)
+ * Phase 3.5 hardening:
+ *   - Enforces workspace_id from the email row on every account pick.
+ *   - Suppression check uses Redis SISMEMBER cache (~0.5ms) instead of DB.
+ *   - Fixes H14: increments `campaigns.sent_count` after a successful send.
+ *   - Fails over up to 3 accounts on retriable provider errors.
+ *   - Provider latency recorded on the account row.
  */
 
 import {
   emailRepository,
   emailEventRepository,
-  suppressionRepository,
   emailAccountRepository,
   senderPoolRepository,
   campaignRepository,
   Email,
   EmailAccount,
 } from "../db/repositories";
+import { suppressionRepository } from "../db/repositories/suppression.repository";
+import { suppressionCacheService } from "./suppressionCache.service";
 import { trackingService } from "./tracking.service";
 import { getProviderFor, EmailPayload, EmailProviderError } from "../providers/email";
+import { log } from "../observability/logger";
 
 const MAX_FAILOVER_ATTEMPTS = 3;
 
@@ -46,23 +45,30 @@ export class NoSenderAvailableError extends Error {
   }
 }
 
-async function pickAccountForCampaign(email: Email): Promise<EmailAccount | null> {
-  // If the email already had a sender pinned (e.g. retry), respect it.
-  if (email.senderIdentityId) {
-    const acct = await emailAccountRepository.findById(email.senderIdentityId);
+async function pickAccountForEmail(email: Email, exclude: Set<string>): Promise<EmailAccount | null> {
+  const workspaceId = email.workspaceId;
+  if (!workspaceId) return null;
+
+  // If the email already had a sender pinned and it's still healthy, respect it.
+  if (email.senderIdentityId && !exclude.has(email.senderIdentityId)) {
+    const acct = await emailAccountRepository.findById(email.senderIdentityId, workspaceId);
     if (acct && acct.isActive && acct.isHealthy) return acct;
   }
+
   // If the campaign has a sender pool, use its strategy.
   if (email.campaignId) {
     const campaign = await campaignRepository.findById(email.campaignId);
     const poolId = (campaign as any)?.senderPoolId as string | undefined;
     if (poolId) {
       const picked = await senderPoolRepository.pickFromPool(poolId);
-      if (picked) return picked;
+      if (picked && !exclude.has(picked.id)) return picked;
     }
   }
-  // Fallback: round-robin over all healthy accounts.
-  return emailAccountRepository.pickRoundRobin();
+
+  // Fallback: workspace-scoped round-robin.
+  const rr = await emailAccountRepository.pickRoundRobin(workspaceId);
+  if (rr && !exclude.has(rr.id)) return rr;
+  return null;
 }
 
 interface DispatchOptions {
@@ -75,8 +81,14 @@ export const emailDispatchService = {
       await emailRepository.setStatus(email.id, "FAILED", { errorMessage: "No destination email." });
       throw new Error("No destination email on row.");
     }
-    if (await suppressionRepository.isSuppressed(email.toEmail)) {
-      const s = await suppressionRepository.findByEmail(email.toEmail);
+    if (!email.workspaceId) {
+      await emailRepository.setStatus(email.id, "FAILED", { errorMessage: "Email row has no workspace_id (should never happen after migration)." });
+      throw new Error("Email row has no workspace_id.");
+    }
+
+    // Suppression: Redis cache first, DB as fallback (inside the cache service).
+    if (await suppressionCacheService.isSuppressed(email.toEmail, email.workspaceId)) {
+      const s = await suppressionRepository.findByEmail(email.toEmail, email.workspaceId);
       await emailRepository.setStatus(email.id, "FAILED", {
         errorMessage: `Suppressed (${s?.reason || "unknown"})`,
       });
@@ -105,22 +117,16 @@ export const emailDispatchService = {
       },
     };
 
-    // Failover: try up to MAX_FAILOVER_ATTEMPTS distinct accounts.
     const triedAccountIds = new Set<string>();
     let lastError: unknown = null;
-    let account: EmailAccount | null = null;
+    let lastAccount: EmailAccount | null = null;
 
     for (let attempt = 1; attempt <= MAX_FAILOVER_ATTEMPTS; attempt++) {
-      account = await pickAccountForCampaign(email);
-      if (!account || triedAccountIds.has(account.id)) {
-        // If we already tried this account (pinned re-pick), pick fresh RR.
-        account = await emailAccountRepository.pickRoundRobin();
-      }
+      const account = await pickAccountForEmail(email, triedAccountIds);
       if (!account) break;
-      if (triedAccountIds.has(account.id)) continue;
       triedAccountIds.add(account.id);
+      lastAccount = account;
 
-      // Mark SENDING and link the tentative sender BEFORE the network call.
       await emailRepository.setStatus(email.id, "SENDING", { provider: account.provider });
       await emailRepository.linkSender(email.id, account.id);
 
@@ -144,9 +150,17 @@ export const emailDispatchService = {
             attempt,
           },
         });
-        console.log(
-          `[dispatch] send OK email=${email.id} to=${email.toEmail} via=${account.provider} account=${account.email} ` +
-          `latency=${result.latencyMs}ms attempt=${attempt}/${MAX_FAILOVER_ATTEMPTS}`
+        // H14 fix: keep campaigns.sent_count in sync with real sends.
+        if (email.campaignId) {
+          await campaignRepository.incrementCounters(email.campaignId, { sentCount: 1 });
+        }
+        log.info(
+          {
+            emailId: email.id, to: email.toEmail, campaignId: email.campaignId,
+            workspaceId: email.workspaceId, provider: account.provider,
+            accountEmail: account.email, latencyMs: result.latencyMs, attempt,
+          },
+          "email sent"
         );
         return updated ?? email;
       } catch (err) {
@@ -154,25 +168,25 @@ export const emailDispatchService = {
         const providerError = err instanceof EmailProviderError ? err : null;
         const message = (err as Error)?.message || "send failed";
         await emailAccountRepository.recordFailure(account.id, message);
-        console.warn(
-          `[dispatch] FAIL email=${email.id} attempt=${attempt}/${MAX_FAILOVER_ATTEMPTS} ` +
-          `account=${account.email} provider=${account.provider} err="${message.slice(0, 160)}"`
+        log.warn(
+          {
+            emailId: email.id, attempt, maxAttempts: MAX_FAILOVER_ATTEMPTS,
+            accountEmail: account.email, provider: account.provider,
+            errMessage: message.slice(0, 300),
+          },
+          "email send failed, may failover"
         );
 
         const retriable = !providerError || providerError.retriable;
-        const isLast = attempt >= MAX_FAILOVER_ATTEMPTS;
-        if (!retriable || isLast) break;
-        // Failover: try a different sender next iteration.
-        continue;
+        if (!retriable || attempt >= MAX_FAILOVER_ATTEMPTS) break;
       }
     }
 
-    if (!account) {
-      throw new NoSenderAvailableError();
-    }
+    if (!lastAccount) throw new NoSenderAvailableError();
+
     const finalMessage = (lastError as Error)?.message || "send failed";
     await emailRepository.setStatus(email.id, "FAILED", {
-      provider: account.provider,
+      provider: lastAccount.provider,
       errorMessage: finalMessage,
     });
     await emailEventRepository.log({

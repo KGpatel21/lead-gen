@@ -5,21 +5,30 @@
  * Application entrypoint.
  *
  * Boot order:
- *   1. config           — validate env, refuse to start on missing critical vars
- *   2. initDatabase()   — run migrations, seed default AI agents
- *   3. redis ping       — verify Redis is reachable
- *   4. Vite / static    — mount client
- *   5. WebSocket        — mount /ws
- *   6. queue worker     — start background sweep loop
- *   7. app.listen()
+ *   1. config          — validate env, refuse to start on missing critical vars
+ *   2. requestContext   — install req-id + async-local logging context
+ *   3. initDatabase()   — run migrations, seed default AI agents
+ *   4. redis ping       — verify Redis is reachable
+ *   5. Vite / static    — mount client
+ *   6. WebSocket        — mount /ws
+ *   7. BullMQ workers   — email-send + follow-up + legacy queue sweep
+ *   8. app.listen()
+ *
+ * Shutdown (Phase 3.5):
+ *   SIGTERM / SIGINT → stop accepting new HTTP → close BullMQ workers
+ *   (drains in-flight jobs) → close Redis → close pg pool → exit(0).
+ *   Hard-kill after 30s so orphan connections cannot linger.
  */
 
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import http from "http";
 import { createServer as createViteServer } from "vite";
+import pinoHttp from "pino-http";
 
 import { config } from "./server/config";
+import { rootLogger, log } from "./server/observability/logger";
+import { requestContextMiddleware } from "./server/middleware/requestContext.middleware";
 import { initDatabase, pool } from "./server/services/db.service";
 import { redisService } from "./server/services/redis.service";
 import apiRouter from "./server/routes/api.routes";
@@ -28,17 +37,38 @@ import { webSocketService } from "./server/services/websocket.service";
 import { queueRepository, campaignRepository, replyRepository, smtpRepository, auditRepository } from "./server/db/repositories";
 import { SesEventsController } from "./server/controllers/sesEvents.controller";
 import { TrackingController } from "./server/controllers/tracking.controller";
+import { emailQueue, queueStats as bullmqQueueStats } from "./server/queues/emailQueue";
+import { followUpQueue } from "./server/queues/followUpQueue";
 
 const app = express();
 const server = http.createServer(app);
 
-// Raw body capture for Stripe webhook signature verification
+// ---------- Request context + structured HTTP logging (Phase 3.5) ----------
+
+app.use(requestContextMiddleware);
+app.use(
+  pinoHttp({
+    logger: rootLogger,
+    autoLogging: {
+      ignore: (req) =>
+        req.url === "/health" ||
+        !!(req.url && req.url.startsWith("/t/o/")) || // opens are noisy
+        !!(req.url && req.url.startsWith("/@vite/")),
+    },
+    serializers: {
+      req(req: any) {
+        return { method: req.method, url: req.url, requestId: req.headers["x-request-id"] };
+      },
+    },
+  })
+);
+
+// ---------- Special bodies (Stripe + SNS) BEFORE express.json ----------
+
 app.use("/api/billing/webhook", express.raw({ type: "application/json" }), (req, _res, next) => {
   (req as any).rawBody = req.body;
   next();
 });
-
-// Amazon SNS posts JSON with Content-Type: text/plain. Accept both flavors.
 app.post(
   "/api/ses/events",
   express.text({ type: "*/*", limit: "1mb" }),
@@ -48,26 +78,25 @@ app.post(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Public tracking + unsubscribe endpoints (email clients hit these directly).
+// ---------- Public tracking + unsubscribe (email clients hit these) ----------
 app.get("/t/o/:token", TrackingController.open.bind(TrackingController));
 app.get("/t/c/:token", TrackingController.click.bind(TrackingController));
 app.get("/unsubscribe/:token", TrackingController.unsubscribe.bind(TrackingController));
 app.post("/unsubscribe/:token", TrackingController.unsubscribe.bind(TrackingController));
 
+// ---------- API ----------
 app.use("/api", apiRouter);
 app.use("/api/v1", apiRouter);
 
 // ---------- Observability ----------
 
 let httpRequestsTotal = 0;
-app.use((_req, _res, next) => {
-  httpRequestsTotal++;
-  next();
-});
+app.use((_req, _res, next) => { httpRequestsTotal++; next(); });
 
 app.get("/metrics", async (_req: Request, res: Response) => {
   try {
     const stats = await queueRepository.stats();
+    const bullmq = await bullmqQueueStats().catch(() => ({ waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 } as any));
     const campaigns = await campaignRepository.list();
     const sentCount = campaigns.reduce((s, c) => s + c.sentCount, 0);
     const replies = (await replyRepository.list()).length;
@@ -88,17 +117,29 @@ platform_campaign_emails_sent_total ${sentCount}
 # TYPE platform_incoming_replies_total counter
 platform_incoming_replies_total ${replies}
 
-# HELP platform_queue_pending Number of QUEUED items in the dispatch queue.
+# HELP platform_queue_pending Legacy queue: number of QUEUED items.
 # TYPE platform_queue_pending gauge
 platform_queue_pending ${stats.queued}
 
-# HELP platform_queue_pending_active Number of items currently PENDING dispatch.
-# TYPE platform_queue_pending_active gauge
-platform_queue_pending_active ${stats.pending}
-
-# HELP platform_queue_failed Number of FAILED items in the dispatch queue.
+# HELP platform_queue_failed Legacy queue: number of FAILED items.
 # TYPE platform_queue_failed gauge
 platform_queue_failed ${stats.failed}
+
+# HELP bullmq_email_send_waiting BullMQ email-send queue: waiting job count.
+# TYPE bullmq_email_send_waiting gauge
+bullmq_email_send_waiting ${bullmq.waiting ?? 0}
+
+# HELP bullmq_email_send_active BullMQ email-send queue: active job count.
+# TYPE bullmq_email_send_active gauge
+bullmq_email_send_active ${bullmq.active ?? 0}
+
+# HELP bullmq_email_send_delayed BullMQ email-send queue: scheduled/delayed count.
+# TYPE bullmq_email_send_delayed gauge
+bullmq_email_send_delayed ${bullmq.delayed ?? 0}
+
+# HELP bullmq_email_send_failed BullMQ email-send queue: failed count.
+# TYPE bullmq_email_send_failed gauge
+bullmq_email_send_failed ${bullmq.failed ?? 0}
 
 # HELP platform_smtp_accounts_active Number of active SMTP accounts.
 # TYPE platform_smtp_accounts_active gauge
@@ -127,7 +168,6 @@ app.get("/health", async (_req: Request, res: Response) => {
   } catch (err: any) {
     services.postgres = `ERROR: ${err.message}`;
   }
-
   try {
     const p = await redisService.ping();
     services.redis = p === "PONG" ? "CONNECTED" : "DEGRADED";
@@ -143,8 +183,7 @@ app.get("/health", async (_req: Request, res: Response) => {
     const p = getAIProvider();
     services.ai_provider = `${p.name}:${p.model} (${p.isConfigured() ? "CONFIGURED" : "NOT_CONFIGURED"})`;
   }
-  services.stripe   = config.stripeSecretKey ? "CONFIGURED" : "NOT_CONFIGURED";
-
+  services.stripe = config.stripeSecretKey ? "CONFIGURED" : "NOT_CONFIGURED";
   services.queue_worker = `ACTIVE (last sweep: ${queueWorker.lastSweepTime})`;
 
   const mem = process.memoryUsage();
@@ -167,9 +206,37 @@ app.get("/health", async (_req: Request, res: Response) => {
   });
 });
 
+/**
+ * Worker-specific health: reports both BullMQ workers' state, queue depths,
+ * and the last sweep time of the legacy interval worker. Useful for K8s
+ * liveness / readiness probes.
+ */
+app.get("/health/workers", async (_req: Request, res: Response) => {
+  const bullmqEmail = await emailQueue.getJobCounts("waiting", "active", "delayed", "completed", "failed", "prioritized")
+    .catch((e) => ({ error: e.message }));
+  const bullmqFollowUp = await followUpQueue.getJobCounts("waiting", "active", "delayed", "completed", "failed", "prioritized")
+    .catch((e) => ({ error: e.message }));
+  const emailQueueReady = (bullmqEmail as any).error ? false : true;
+  const followUpQueueReady = (bullmqFollowUp as any).error ? false : true;
+  const legacySweepAgeMs = Date.now() - new Date(queueWorker.lastSweepTime).getTime();
+
+  const healthy = emailQueueReady && followUpQueueReady && legacySweepAgeMs < 60_000;
+
+  res.status(healthy ? 200 : 503).json({
+    healthy,
+    workers: {
+      email_send: emailQueueReady ? "UP" : "DOWN",
+      follow_up: followUpQueueReady ? "UP" : "DOWN",
+      legacy_sweep: legacySweepAgeMs < 60_000 ? "UP" : `STALE (${Math.round(legacySweepAgeMs/1000)}s)`,
+    },
+    email_queue: bullmqEmail,
+    follow_up_queue: bullmqFollowUp,
+  });
+});
+
 // Global error handler (last).
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
-  console.error(`[api-error] ${req.method} ${req.path}`, err?.message || err);
+  log.error({ err: err?.message || String(err), method: req.method, path: req.path }, "unhandled api error");
   auditRepository.log({
     action: `Unhandled error ${req.method} ${req.path}`,
     category: "ERROR",
@@ -180,24 +247,22 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ success: false, error: "Internal server error." });
 });
 
+// ---------- Boot ----------
+
 async function startFullStackServer(): Promise<void> {
-  console.log(`[boot] NODE_ENV=${config.nodeEnv}`);
+  log.info({ nodeEnv: config.nodeEnv }, "boot start");
   await initDatabase();
 
-  // Prove Redis is reachable during boot; the app is unusable without it.
   try {
     const p = await redisService.ping();
-    console.log(`[boot] redis ping: ${p}`);
+    log.info({ redis: p }, "boot: redis ok");
   } catch (err: any) {
-    console.error(`[boot] Redis unreachable: ${err.message}`);
+    log.error({ err: err.message }, "boot: redis unreachable");
     throw err;
   }
 
   if (config.nodeEnv !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
@@ -210,29 +275,80 @@ async function startFullStackServer(): Promise<void> {
   webSocketService.initialize(server);
   queueWorker.startWorkerInterval();
 
-  // BullMQ workers: start with the process. Constructors are side-effectful,
-  // so importing here is what registers them with the queue.
   await import("./server/queues/emailSend.worker");
   await import("./server/queues/followUp.worker");
-  console.log("[boot] BullMQ workers started (email-send, follow-up)");
+  log.info("BullMQ workers registered (email-send, follow-up)");
 
   server.listen(config.port, "0.0.0.0", () => {
-    console.log(`[boot] server listening on http://localhost:${config.port}`);
-    console.log(`[boot] health: http://localhost:${config.port}/health`);
+    log.info({ port: config.port, url: `http://localhost:${config.port}` }, "server listening");
   });
 }
 
+// ---------- Graceful shutdown (C3) ----------
+
+let shuttingDown = false;
+async function gracefulShutdown(signal: string, timeoutMs = 30_000): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info({ signal }, "graceful shutdown starting");
+
+  const hardKill = setTimeout(() => {
+    log.error({ timeoutMs }, "graceful shutdown timed out — force exiting");
+    process.exit(1);
+  }, timeoutMs).unref();
+
+  try {
+    // 1. Stop accepting new HTTP.
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      // In case there are no active sockets close resolves immediately;
+      // otherwise Node keeps the callback pending till they drain.
+    });
+    log.info("http server closed");
+
+    // 2. Drain BullMQ workers (Worker.close(true) waits for active jobs).
+    try {
+      const { emailSendWorker } = await import("./server/queues/emailSend.worker");
+      await emailSendWorker.close();
+      log.info("bullmq email-send worker drained");
+    } catch (err: any) {
+      log.warn({ err: err?.message }, "bullmq email-send worker close error");
+    }
+    try {
+      const { followUpWorker } = await import("./server/queues/followUp.worker");
+      await followUpWorker.close();
+      log.info("bullmq follow-up worker drained");
+    } catch (err: any) {
+      log.warn({ err: err?.message }, "bullmq follow-up worker close error");
+    }
+
+    // 3. Close BullMQ queues + shared redis + pg pool.
+    try { await emailQueue.close(); } catch { /* ignore */ }
+    try { await followUpQueue.close(); } catch { /* ignore */ }
+    try { await (redisService.getClient() as any).quit(); } catch { /* ignore */ }
+    try { await pool.end(); } catch { /* ignore */ }
+
+    clearTimeout(hardKill);
+    log.info("graceful shutdown complete");
+    process.exit(0);
+  } catch (err: any) {
+    log.error({ err: err.message }, "graceful shutdown error");
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => void gracefulShutdown("SIGINT"));
+
 // Keep the server alive if an async route handler rejects without next(err).
-// Express 4 doesn't auto-forward async rejections; without this the whole
-// process would die on a single flaky DB call. Log and keep serving.
 process.on("unhandledRejection", (reason: any) => {
-  console.error("[unhandledRejection]", reason?.message || reason);
+  log.error({ err: reason?.message || String(reason) }, "unhandledRejection");
 });
 process.on("uncaughtException", (err: Error) => {
-  console.error("[uncaughtException]", err.message);
+  log.error({ err: err.message, stack: err.stack }, "uncaughtException");
 });
 
 startFullStackServer().catch((err) => {
-  console.error("[boot] fatal:", err?.message || err);
+  log.fatal({ err: err?.message || err }, "boot fatal");
   process.exit(1);
 });

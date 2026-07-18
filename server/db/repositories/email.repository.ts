@@ -21,6 +21,7 @@ export type EmailStatus =
 
 export interface Email {
   id: string;
+  workspaceId?: string;
   campaignId?: string;
   businessId?: string;
   leadId?: string;
@@ -58,6 +59,7 @@ export interface Email {
 }
 
 export interface CreateEmailInput {
+  workspaceId: string;
   campaignId?: string;
   businessId?: string;
   leadId?: string;
@@ -82,6 +84,7 @@ const iso = (v: unknown): string =>
 function mapEmail(r: any): Email {
   return {
     id: r.id,
+    workspaceId: r.workspace_id || undefined,
     campaignId: r.campaign_id || undefined,
     businessId: r.business_id || undefined,
     leadId: r.lead_id || undefined,
@@ -133,16 +136,18 @@ export const emailRepository = {
   },
 
   async create(input: CreateEmailInput): Promise<Email> {
+    if (!input.workspaceId) throw new Error("emailRepository.create requires workspaceId");
     const id = `em-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const r = await pool.query(
       `INSERT INTO emails (
-         id, campaign_id, business_id, lead_id, to_email, from_email,
+         id, workspace_id, campaign_id, business_id, lead_id, to_email, from_email,
          subject, body_text, body_html, opening_line, pain_points, benefits, cta,
          confidence_score, email_tone, status, scheduled_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16,$17,$18)
        RETURNING *`,
       [
         id,
+        input.workspaceId,
         input.campaignId || null,
         input.businessId || null,
         input.leadId || null,
@@ -162,6 +167,43 @@ export const emailRepository = {
       ]
     );
     return mapEmail(r.rows[0]);
+  },
+
+  /**
+   * Streaming iterator over READY/RETRY emails in batches so an
+   * enterprise-sized 100k-row campaign never gets pulled entirely into
+   * Node memory. Callers `for await` the batches.
+   */
+  async *streamReadyForCampaign(campaignId: string, batchSize = 200): AsyncGenerator<Email[]> {
+    let lastCreatedAt: Date | null = null;
+    let lastId: string | null = null;
+    while (true) {
+      const params: unknown[] = [campaignId, batchSize];
+      let where = "campaign_id = $1 AND status IN ('READY','RETRY')";
+      if (lastCreatedAt) {
+        where += " AND (created_at, id) > ($3, $4)";
+        params.push(lastCreatedAt.toISOString(), lastId);
+      }
+      const r = await pool.query(
+        `SELECT * FROM emails WHERE ${where} ORDER BY created_at ASC, id ASC LIMIT $2`,
+        params
+      );
+      if (r.rows.length === 0) return;
+      const batch = r.rows.map(mapEmail);
+      yield batch;
+      const last = r.rows[r.rows.length - 1];
+      lastCreatedAt = last.created_at;
+      lastId = last.id;
+      if (r.rows.length < batchSize) return;
+    }
+  },
+
+  async countReadyForCampaign(campaignId: string): Promise<number> {
+    const r = await pool.query(
+      "SELECT COUNT(*)::int AS n FROM emails WHERE campaign_id = $1 AND status IN ('READY','RETRY')",
+      [campaignId]
+    );
+    return r.rows[0]?.n || 0;
   },
 
   async setStatus(id: string, status: EmailStatus, extra?: { provider?: string; messageId?: string; errorMessage?: string; sentAt?: Date }): Promise<Email | null> {
@@ -268,10 +310,15 @@ export const emailRepository = {
     return r.rows[0] ? mapEmail(r.rows[0]) : null;
   },
 
-  async recordOpen(emailId: string): Promise<void> {
+  async recordOpen(emailId: string, opts?: { userAgent?: string; fromProxy?: boolean }): Promise<void> {
     await pool.query(
-      "UPDATE emails SET opened_at = COALESCE(opened_at, NOW()), updated_at = NOW() WHERE id = $1",
-      [emailId]
+      `UPDATE emails
+         SET opened_at = COALESCE(opened_at, NOW()),
+             first_open_user_agent = COALESCE(first_open_user_agent, $2),
+             open_from_proxy = CASE WHEN opened_at IS NULL THEN COALESCE($3, open_from_proxy) ELSE open_from_proxy END,
+             updated_at = NOW()
+       WHERE id = $1`,
+      [emailId, opts?.userAgent || null, opts?.fromProxy ?? null]
     );
   },
 

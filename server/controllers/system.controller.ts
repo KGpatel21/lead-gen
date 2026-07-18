@@ -308,7 +308,10 @@ export class SystemController {
 
       // Persist as a new campaign + leads.
       const cleanTopic = topic.replace(/[^a-zA-Z0-9 ]/g, "").substring(0, 30).trim();
+      const workspaceId = (req as any).workspaceId as string | undefined;
+      if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
       const campaign = await campaignRepository.create({
+        workspaceId,
         name: `Autonomous [${cleanTopic}] — ${new Date().toISOString().slice(0, 16)}`,
         status: CampaignStatus.DRAFT,
         subjectTemplate: `Quick question regarding {{company}}'s scaling metrics`,

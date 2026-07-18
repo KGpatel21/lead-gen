@@ -3,9 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Central configuration & fail-fast validation.
- *
  * Loaded once at boot. Any code that reaches for `process.env.X` directly
  * is a bug — add it here so the boot-time validation catches it.
+ *
+ * Phase 3.5 hardening:
+ *   - Separate secrets: AUTH_JWT_SECRET / TRACKING_HMAC_SECRET /
+ *     OAUTH_STATE_SECRET / ENCRYPTION_KEY. Each falls back to JWT_SECRET
+ *     if the specific variable is unset, so existing installs keep working.
+ *     Set them individually in production.
+ *   - ENCRYPTION_KEY_ID: schema tag for future key rotation. Every AES
+ *     ciphertext embeds the key_id used so multiple keys can coexist.
+ *   - SENDER_POSTAL_ADDRESS + SENDER_COMPANY_NAME: required in production
+ *     to satisfy CAN-SPAM.
  */
 
 import dotenv from "dotenv";
@@ -22,8 +31,12 @@ interface AppConfig {
   databaseUrl: string;
   redisUrl: string;
 
-  jwtSecret: string;
-  encryptionKey: string;
+  // ---- separate secrets (Phase 3.5) ----
+  jwtSecret: string;                    // used ONLY to sign session JWTs
+  trackingHmacSecret: string;           // signs open/click/unsubscribe tokens
+  oauthStateSecret: string;             // signs OAuth `state` parameter
+  encryptionKey: string;                // AES-256 material (see securityService)
+  encryptionKeyId: string;              // tag stored on every ciphertext
 
   aiProvider: "groq" | "gemini";
   groqApiKey: string | null;
@@ -49,8 +62,14 @@ interface AppConfig {
   awsRegion: string;
   sesFromEmail: string | null;
   sesConfigurationSet: string | null;
-  /** Public base URL used to build tracking + unsubscribe links in outbound HTML. */
   publicBaseUrl: string;
+
+  // ---- CAN-SPAM (Phase 3.5) ----
+  senderCompanyName: string | null;
+  senderPostalAddress: string | null;
+
+  // ---- Logging ----
+  logLevel: "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 }
 
 function required(name: string): string {
@@ -73,6 +92,8 @@ const rawNodeEnv = (process.env.NODE_ENV || "development").toLowerCase();
 const nodeEnv: NodeEnv =
   rawNodeEnv === "production" || rawNodeEnv === "test" ? rawNodeEnv : "development";
 
+const legacyJwtSecret = required("JWT_SECRET");
+
 export const config: AppConfig = {
   nodeEnv,
   isProduction: nodeEnv === "production",
@@ -82,8 +103,13 @@ export const config: AppConfig = {
   databaseUrl: required("DATABASE_URL"),
   redisUrl: required("REDIS_URL"),
 
-  jwtSecret: required("JWT_SECRET"),
-  encryptionKey: required("ENCRYPTION_KEY"),
+  // Separate secrets — each falls back to JWT_SECRET so this migration is
+  // non-breaking. In production, set all four to independent values.
+  jwtSecret:            legacyJwtSecret,
+  trackingHmacSecret:   optional("TRACKING_HMAC_SECRET") || `${legacyJwtSecret}::tracking`,
+  oauthStateSecret:     optional("OAUTH_STATE_SECRET")   || `${legacyJwtSecret}::oauth`,
+  encryptionKey:        required("ENCRYPTION_KEY"),
+  encryptionKeyId:      optional("ENCRYPTION_KEY_ID")    || "v1",
 
   aiProvider: (() => {
     const raw = (process.env.AI_PROVIDER || "groq").toLowerCase().trim();
@@ -116,6 +142,11 @@ export const config: AppConfig = {
   sesFromEmail: optional("SES_FROM_EMAIL"),
   sesConfigurationSet: optional("SES_CONFIGURATION_SET"),
   publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || process.env.APP_URL?.trim() || "http://localhost:3000",
+
+  senderCompanyName:   optional("SENDER_COMPANY_NAME"),
+  senderPostalAddress: optional("SENDER_POSTAL_ADDRESS"),
+
+  logLevel: (process.env.LOG_LEVEL?.trim().toLowerCase() as AppConfig["logLevel"]) || "info",
 };
 
 if (config.jwtSecret.length < 24) {
@@ -123,4 +154,20 @@ if (config.jwtSecret.length < 24) {
 }
 if (config.encryptionKey.length < 24) {
   throw new Error("[config] ENCRYPTION_KEY must be at least 24 characters of entropy.");
+}
+if (config.trackingHmacSecret.length < 24) {
+  throw new Error("[config] TRACKING_HMAC_SECRET must be at least 24 characters of entropy.");
+}
+if (config.oauthStateSecret.length < 24) {
+  throw new Error("[config] OAUTH_STATE_SECRET must be at least 24 characters of entropy.");
+}
+
+// CAN-SPAM: physical postal address is REQUIRED in production.
+if (config.isProduction) {
+  if (!config.senderCompanyName || !config.senderPostalAddress) {
+    throw new Error(
+      "[config] SENDER_COMPANY_NAME and SENDER_POSTAL_ADDRESS are required in production. " +
+      "CAN-SPAM §7704(a)(5) requires a valid physical postal address in every commercial email."
+    );
+  }
 }

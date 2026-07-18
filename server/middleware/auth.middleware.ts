@@ -15,7 +15,12 @@ import { SecurityService } from "../services/security.service";
 import { SecurityRole } from "../../src/types";
 
 export interface AuthenticatedRequest extends Request {
-  user?: { id: string; email: string; role: SecurityRole };
+  user?: { id: string; email: string; role: SecurityRole; workspaceId?: string };
+  /**
+   * Populated by `authenticateJwt` when the JWT payload includes it.
+   * Repositories use this for workspace-scoped queries.
+   */
+  workspaceId?: string;
 }
 
 export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
@@ -25,12 +30,15 @@ export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: 
     return;
   }
   const token = header.slice(7).trim();
-  const decoded = SecurityService.verifyJwt<{ id: string; email: string; role: SecurityRole }>(token);
+  const decoded = SecurityService.verifyJwt<{ id: string; email: string; role: SecurityRole; workspaceId?: string }>(token);
   if (!decoded || !decoded.id || !decoded.email || !decoded.role) {
     res.status(401).json({ success: false, error: "Invalid or expired session token." });
     return;
   }
-  req.user = { id: decoded.id, email: decoded.email, role: decoded.role };
+  req.user = { id: decoded.id, email: decoded.email, role: decoded.role, workspaceId: decoded.workspaceId };
+  // Multi-tenancy: propagate workspaceId to the request scope so repos can
+  // filter without needing a separate middleware on every route.
+  if (decoded.workspaceId) req.workspaceId = decoded.workspaceId;
   next();
 }
 

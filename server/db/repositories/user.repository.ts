@@ -15,6 +15,7 @@ export interface CreateUserInput {
   role: SecurityRole;
   passwordHash: string;
   passwordSalt: string;
+  workspaceId?: string;
 }
 
 export const userRepository = {
@@ -47,11 +48,15 @@ export const userRepository = {
   async create(input: CreateUserInput): Promise<DbUser> {
     const id = `usr-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const r = await pool.query(
-      `INSERT INTO users (id, name, email, role, password_hash, password_salt)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [id, input.name, input.email, input.role, input.passwordHash, input.passwordSalt]
+      `INSERT INTO users (id, name, email, role, password_hash, password_salt, workspace_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [id, input.name, input.email, input.role, input.passwordHash, input.passwordSalt, input.workspaceId || null]
     );
     return mapUser(r.rows[0]);
+  },
+
+  async setWorkspace(userId: string, workspaceId: string): Promise<void> {
+    await pool.query("UPDATE users SET workspace_id = $1 WHERE id = $2", [workspaceId, userId]);
   },
 
   async updatePassword(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {

@@ -2,21 +2,29 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Unified email account repository (Phase 4).
+ * Unified email account repository (Phase 4 + Phase 3.5 hardening).
  *
- * A single row per connected sender. Rotating dispatch, health tracking,
- * and OAuth state all live here. Providers are transport-neutral: the row
- * carries either SMTP creds, OAuth tokens, or an SES verification status.
+ * A single row per connected sender. Every query is workspace-scoped:
+ * pass a workspaceId to any list/find/pick method to enforce isolation.
+ * Passing no workspaceId is only allowed from internal jobs that already
+ * know the account.id (SNS event handlers, direct BullMQ worker lookups).
+ *
+ * Encryption:
+ *   - SMTP passwords + OAuth refresh/access tokens are stored AES-256-CBC.
+ *   - The active encryption key id is tagged on every write for future
+ *     rotation.
  */
 
 import crypto from "crypto";
 import { pool } from "../pool";
+import { config } from "../../config";
 
 export type ProviderKind = "ses" | "smtp" | "gmail_oauth" | "outlook_oauth";
 export type ProviderCategory = "transactional" | "user_mailbox";
 
 export interface EmailAccount {
   id: string;
+  workspaceId: string;
   provider: ProviderKind;
   providerKind: ProviderCategory;
   email: string;
@@ -37,6 +45,7 @@ export interface EmailAccount {
   imapPort?: number;
   imapSecure?: boolean;
   imapUsername?: string;
+  encryptionKeyId?: string;
   dailySendLimit: number;
   sentToday: number;
   sentTodayResetOn?: string;
@@ -63,6 +72,7 @@ const iso = (v: unknown): string =>
 function mapRow(r: any): EmailAccount {
   return {
     id: r.id,
+    workspaceId: r.workspace_id || "",
     provider: (r.provider || "ses") as ProviderKind,
     providerKind: (r.provider_kind || "transactional") as ProviderCategory,
     email: r.email,
@@ -83,6 +93,7 @@ function mapRow(r: any): EmailAccount {
     imapPort: r.imap_port == null ? undefined : Number(r.imap_port),
     imapSecure: r.imap_secure == null ? undefined : Boolean(r.imap_secure),
     imapUsername: r.imap_username || undefined,
+    encryptionKeyId: r.encryption_key_id || undefined,
     dailySendLimit: r.daily_send_limit,
     sentToday: r.sent_today,
     sentTodayResetOn: r.sent_today_reset_on ? String(r.sent_today_reset_on) : undefined,
@@ -104,7 +115,6 @@ function mapRow(r: any): EmailAccount {
   };
 }
 
-/** Fields any provider can update on itself. */
 export interface EmailAccountPatch {
   displayName?: string;
   smtpHost?: string;
@@ -156,6 +166,7 @@ const patchColumnMap: Record<string, string> = {
 };
 
 export interface CreateEmailAccountInput {
+  workspaceId: string;
   provider: ProviderKind;
   providerKind?: ProviderCategory;
   email: string;
@@ -173,19 +184,40 @@ export interface CreateEmailAccountInput {
 }
 
 export const emailAccountRepository = {
-  async list(): Promise<EmailAccount[]> {
+  async list(workspaceId?: string): Promise<EmailAccount[]> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM email_accounts WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+        [workspaceId]
+      );
+      return r.rows.map(mapRow);
+    }
     const r = await pool.query(
       "SELECT * FROM email_accounts WHERE deleted_at IS NULL ORDER BY created_at DESC"
     );
     return r.rows.map(mapRow);
   },
 
-  async findById(id: string): Promise<EmailAccount | null> {
+  async findById(id: string, workspaceId?: string): Promise<EmailAccount | null> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM email_accounts WHERE id = $1 AND workspace_id = $2",
+        [id, workspaceId]
+      );
+      return r.rows[0] ? mapRow(r.rows[0]) : null;
+    }
     const r = await pool.query("SELECT * FROM email_accounts WHERE id = $1", [id]);
     return r.rows[0] ? mapRow(r.rows[0]) : null;
   },
 
-  async findByEmail(email: string): Promise<EmailAccount | null> {
+  async findByEmail(email: string, workspaceId?: string): Promise<EmailAccount | null> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM email_accounts WHERE LOWER(email) = LOWER($1) AND workspace_id = $2 AND deleted_at IS NULL",
+        [email, workspaceId]
+      );
+      return r.rows[0] ? mapRow(r.rows[0]) : null;
+    }
     const r = await pool.query(
       "SELECT * FROM email_accounts WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL",
       [email]
@@ -194,17 +226,19 @@ export const emailAccountRepository = {
   },
 
   async create(input: CreateEmailAccountInput): Promise<EmailAccount> {
+    if (!input.workspaceId) throw new Error("emailAccountRepository.create requires workspaceId");
     const id = `acct-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const domain = input.email.split("@")[1] || null;
     const r = await pool.query(
       `INSERT INTO email_accounts
-         (id, provider, provider_kind, email, display_name, from_domain, daily_send_limit,
+         (id, workspace_id, provider, provider_kind, email, display_name, from_domain, daily_send_limit,
           smtp_host, smtp_port, smtp_secure, smtp_username, smtp_password_encrypted,
-          imap_host, imap_port, imap_secure, imap_username)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          imap_host, imap_port, imap_secure, imap_username, encryption_key_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING *`,
       [
         id,
+        input.workspaceId,
         input.provider,
         input.providerKind || (input.provider === "ses" ? "transactional" : "user_mailbox"),
         input.email.trim().toLowerCase(),
@@ -220,12 +254,13 @@ export const emailAccountRepository = {
         input.imapPort ?? null,
         input.imapSecure ?? null,
         input.imapUsername || null,
+        input.smtpPasswordEncrypted ? config.encryptionKeyId : null,
       ]
     );
     return mapRow(r.rows[0]);
   },
 
-  async update(id: string, patch: EmailAccountPatch): Promise<EmailAccount | null> {
+  async update(id: string, patch: EmailAccountPatch, workspaceId?: string): Promise<EmailAccount | null> {
     const sets: string[] = [];
     const values: unknown[] = [];
     let i = 1;
@@ -235,24 +270,48 @@ export const emailAccountRepository = {
       if (val instanceof Date) { sets.push(`${col} = $${i++}`); values.push(val.toISOString()); }
       else { sets.push(`${col} = $${i++}`); values.push(val); }
     }
-    if (sets.length === 0) return this.findById(id);
+    // Retag encryption_key_id whenever we rewrite a secret.
+    if (patch.smtpPasswordEncrypted !== undefined || patch.oauthAccessTokenEncrypted !== undefined || patch.oauthRefreshTokenEncrypted !== undefined) {
+      sets.push(`encryption_key_id = $${i++}`);
+      values.push(config.encryptionKeyId);
+    }
+    if (sets.length === 0) return this.findById(id, workspaceId);
     sets.push("updated_at = NOW()");
     values.push(id);
+    const scope = workspaceId ? ` AND workspace_id = $${i + 1}` : "";
+    if (workspaceId) values.push(workspaceId);
     const r = await pool.query(
-      `UPDATE email_accounts SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL RETURNING *`,
+      `UPDATE email_accounts SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL${scope} RETURNING *`,
       values
     );
     return r.rows[0] ? mapRow(r.rows[0]) : null;
   },
 
-  async softDelete(id: string): Promise<void> {
-    await pool.query(
-      "UPDATE email_accounts SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1",
-      [id]
-    );
+  async softDelete(id: string, workspaceId?: string): Promise<void> {
+    if (workspaceId) {
+      await pool.query(
+        "UPDATE email_accounts SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND workspace_id = $2",
+        [id, workspaceId]
+      );
+    } else {
+      await pool.query(
+        "UPDATE email_accounts SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1",
+        [id]
+      );
+    }
   },
 
-  async listActiveHealthy(): Promise<EmailAccount[]> {
+  async listActiveHealthy(workspaceId?: string): Promise<EmailAccount[]> {
+    if (workspaceId) {
+      const r = await pool.query(
+        `SELECT * FROM email_accounts
+         WHERE deleted_at IS NULL AND is_active = TRUE AND is_healthy = TRUE
+           AND workspace_id = $1
+           AND (provider != 'ses' OR ses_verification_status = 'VERIFIED')`,
+        [workspaceId]
+      );
+      return r.rows.map(mapRow);
+    }
     const r = await pool.query(
       `SELECT * FROM email_accounts
        WHERE deleted_at IS NULL AND is_active = TRUE AND is_healthy = TRUE
@@ -262,10 +321,10 @@ export const emailAccountRepository = {
   },
 
   /**
-   * Round-robin selection. Atomically decrements the per-day quota so two
-   * workers cannot double-pick.
+   * Round-robin pick, workspace-scoped. Atomically decrements the per-day
+   * quota so two workers cannot double-pick.
    */
-  async pickRoundRobin(accountIds?: string[]): Promise<EmailAccount | null> {
+  async pickRoundRobin(workspaceId?: string, accountIds?: string[]): Promise<EmailAccount | null> {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -275,17 +334,21 @@ export const emailAccountRepository = {
          WHERE (sent_today_reset_on IS NULL OR sent_today_reset_on < CURRENT_DATE)
            AND deleted_at IS NULL`
       );
-      const wherePart = accountIds && accountIds.length > 0 ? "AND id = ANY($1)" : "";
-      const params = accountIds && accountIds.length > 0 ? [accountIds] : [];
+      const filters: string[] = [
+        "deleted_at IS NULL",
+        "is_active = TRUE",
+        "is_healthy = TRUE",
+        "(provider != 'ses' OR ses_verification_status = 'VERIFIED')",
+        "sent_today < daily_send_limit",
+        "reputation_score > 40",
+      ];
+      const params: unknown[] = [];
+      let i = 1;
+      if (workspaceId) { filters.push(`workspace_id = $${i++}`); params.push(workspaceId); }
+      if (accountIds && accountIds.length > 0) { filters.push(`id = ANY($${i++})`); params.push(accountIds); }
       const r = await client.query(
         `SELECT * FROM email_accounts
-         WHERE deleted_at IS NULL
-           AND is_active = TRUE
-           AND is_healthy = TRUE
-           AND (provider != 'ses' OR ses_verification_status = 'VERIFIED')
-           AND sent_today < daily_send_limit
-           AND reputation_score > 40
-           ${wherePart}
+         WHERE ${filters.join(" AND ")}
          ORDER BY last_used_at NULLS FIRST, last_used_at ASC
          LIMIT 1
          FOR UPDATE SKIP LOCKED`,
@@ -311,24 +374,26 @@ export const emailAccountRepository = {
     }
   },
 
-  /**
-   * Least-used selection (by delivery_count + sent_today).
-   */
-  async pickLeastUsed(accountIds?: string[]): Promise<EmailAccount | null> {
-    const wherePart = accountIds && accountIds.length > 0 ? "AND id = ANY($1)" : "";
-    const params = accountIds && accountIds.length > 0 ? [accountIds] : [];
+  async pickLeastUsed(workspaceId?: string, accountIds?: string[]): Promise<EmailAccount | null> {
+    const filters: string[] = [
+      "deleted_at IS NULL",
+      "is_active = TRUE",
+      "is_healthy = TRUE",
+      "(provider != 'ses' OR ses_verification_status = 'VERIFIED')",
+      "sent_today < daily_send_limit",
+    ];
+    const params: unknown[] = [];
+    let i = 1;
+    if (workspaceId) { filters.push(`workspace_id = $${i++}`); params.push(workspaceId); }
+    if (accountIds && accountIds.length > 0) { filters.push(`id = ANY($${i++})`); params.push(accountIds); }
     const r = await pool.query(
       `SELECT * FROM email_accounts
-       WHERE deleted_at IS NULL AND is_active = TRUE AND is_healthy = TRUE
-         AND (provider != 'ses' OR ses_verification_status = 'VERIFIED')
-         AND sent_today < daily_send_limit
-         ${wherePart}
+       WHERE ${filters.join(" AND ")}
        ORDER BY (delivery_count + sent_today) ASC, last_used_at NULLS FIRST
        LIMIT 1`,
       params
     );
     if (!r.rows[0]) return null;
-    // Atomically bump sent_today.
     await pool.query(
       "UPDATE email_accounts SET sent_today = sent_today + 1, last_used_at = NOW(), updated_at = NOW() WHERE id = $1",
       [r.rows[0].id]

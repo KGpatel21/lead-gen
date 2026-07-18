@@ -20,6 +20,7 @@ const ALLOWED_UPDATE_FIELDS: Record<string, string> = {
 };
 
 export interface CreateCampaignInput {
+  workspaceId: string;
   name: string;
   subjectTemplate?: string;
   bodyTemplate?: string;
@@ -31,14 +32,28 @@ export interface CreateCampaignInput {
 }
 
 export const campaignRepository = {
-  async list(): Promise<Campaign[]> {
+  async list(workspaceId?: string): Promise<Campaign[]> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM campaigns WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+        [workspaceId]
+      );
+      return r.rows.map(mapCampaign);
+    }
     const r = await pool.query(
       "SELECT * FROM campaigns WHERE deleted_at IS NULL ORDER BY created_at DESC"
     );
     return r.rows.map(mapCampaign);
   },
 
-  async findById(id: string): Promise<Campaign | null> {
+  async findById(id: string, workspaceId?: string): Promise<Campaign | null> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM campaigns WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL",
+        [id, workspaceId]
+      );
+      return r.rows[0] ? mapCampaign(r.rows[0]) : null;
+    }
     const r = await pool.query(
       "SELECT * FROM campaigns WHERE id = $1 AND deleted_at IS NULL",
       [id]
@@ -46,7 +61,14 @@ export const campaignRepository = {
     return r.rows[0] ? mapCampaign(r.rows[0]) : null;
   },
 
-  async findByNameActive(name: string): Promise<Campaign | null> {
+  async findByNameActive(name: string, workspaceId?: string): Promise<Campaign | null> {
+    if (workspaceId) {
+      const r = await pool.query(
+        "SELECT * FROM campaigns WHERE LOWER(name) = LOWER($1) AND workspace_id = $2 AND deleted_at IS NULL",
+        [name, workspaceId]
+      );
+      return r.rows[0] ? mapCampaign(r.rows[0]) : null;
+    }
     const r = await pool.query(
       "SELECT * FROM campaigns WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL",
       [name]
@@ -63,14 +85,16 @@ export const campaignRepository = {
   },
 
   async create(input: CreateCampaignInput): Promise<Campaign> {
+    if (!input.workspaceId) throw new Error("campaignRepository.create requires workspaceId");
     const id = `camp-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const r = await pool.query(
       `INSERT INTO campaigns
-         (id, name, status, schedule_days, schedule_time_start, schedule_time_end, timezone, subject_template, body_template)
-       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)
+         (id, workspace_id, name, status, schedule_days, schedule_time_start, schedule_time_end, timezone, subject_template, body_template)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)
        RETURNING *`,
       [
         id,
+        input.workspaceId,
         input.name,
         input.status || CampaignStatus.DRAFT,
         JSON.stringify(input.scheduleDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]),

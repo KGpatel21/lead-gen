@@ -203,7 +203,10 @@ observed via Prometheus-format `/metrics`.
 | Billing          | Stripe                                             |
 | Realtime         | `ws` WebSocket server (path `/ws`)                 |
 | Auth             | HMAC-SHA256 signed JWT (`SecurityService`)         |
-| Encryption       | AES-256-CBC (SMTP passwords at rest)               |
+| Encryption       | AES-256-CBC + PBKDF2-derived key (200k iterations), `encryption_key_id` on every ciphertext for rotation |
+| Multi-tenancy    | Every user-data table carries `workspace_id`. New users get a fresh workspace; the first user inherits the system default. Middleware propagates `req.workspaceId` from JWT to every repository call. |
+| Observability    | Pino JSON logs with per-request `X-Request-Id` (AsyncLocalStorage) and auto-redacted secrets. `/health`, `/health/workers`, `/metrics` (Prometheus). |
+| Shutdown         | SIGTERM/SIGINT → HTTP.close → BullMQ Worker.close (drain in-flight) → Redis quit → pg pool.end. 30s force-exit. |
 | Password hashing | PBKDF2-SHA512, 120k iterations                     |
 
 ---
