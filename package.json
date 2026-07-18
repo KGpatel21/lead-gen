@@ -18,7 +18,9 @@
     "@mendable/firecrawl-js": "^4.30.1",
     "@tailwindcss/vite": "^4.1.14",
     "@types/nodemailer": "^8.0.1",
+    "@types/sns-validator": "^0.3.3",
     "@vitejs/plugin-react": "^5.0.4",
+    "bullmq": "^5.80.8",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "ioredis": "^5.11.1",
@@ -28,6 +30,7 @@
     "pg": "^8.22.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "sns-validator": "^0.3.5",
     "stripe": "^22.3.1",
     "vite": "^6.2.3",
     "ws": "^8.21.0"

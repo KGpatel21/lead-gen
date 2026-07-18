@@ -44,6 +44,17 @@ export interface Email {
   sentAt?: string;
   createdAt: string;
   updatedAt: string;
+  // Phase 3
+  senderIdentityId?: string;
+  followUpOf?: string;
+  followUpStep: number;
+  openedAt?: string;
+  clickedAt?: string;
+  deliveredAt?: string;
+  bouncedAt?: string;
+  complainedAt?: string;
+  replyReceivedAt?: string;
+  unsubscribeToken?: string;
 }
 
 export interface CreateEmailInput {
@@ -94,6 +105,16 @@ function mapEmail(r: any): Email {
     sentAt: r.sent_at ? iso(r.sent_at) : undefined,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
+    senderIdentityId: r.sender_identity_id || undefined,
+    followUpOf: r.follow_up_of || undefined,
+    followUpStep: r.follow_up_step ?? 0,
+    openedAt: r.opened_at ? iso(r.opened_at) : undefined,
+    clickedAt: r.clicked_at ? iso(r.clicked_at) : undefined,
+    deliveredAt: r.delivered_at ? iso(r.delivered_at) : undefined,
+    bouncedAt: r.bounced_at ? iso(r.bounced_at) : undefined,
+    complainedAt: r.complained_at ? iso(r.complained_at) : undefined,
+    replyReceivedAt: r.reply_received_at ? iso(r.reply_received_at) : undefined,
+    unsubscribeToken: r.unsubscribe_token || undefined,
   };
 }
 
@@ -205,6 +226,124 @@ export const emailRepository = {
       [campaignId]
     );
     return r.rowCount ?? 0;
+  },
+
+  // ---------- Phase 3 helpers ----------
+
+  async linkSender(emailId: string, senderIdentityId: string): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET sender_identity_id = $1, updated_at = NOW() WHERE id = $2",
+      [senderIdentityId, emailId]
+    );
+  },
+
+  async linkFollowUp(emailId: string, initialEmailId: string, step: number): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET follow_up_of = $1, follow_up_step = $2, updated_at = NOW() WHERE id = $3",
+      [initialEmailId, step, emailId]
+    );
+  },
+
+  async findByMessageId(messageId: string): Promise<Email | null> {
+    const r = await pool.query("SELECT * FROM emails WHERE message_id = $1 LIMIT 1", [messageId]);
+    return r.rows[0] ? mapEmail(r.rows[0]) : null;
+  },
+
+  async findLatestSentToRecipient(recipient: string, campaignId?: string): Promise<Email | null> {
+    if (campaignId) {
+      const r = await pool.query(
+        `SELECT * FROM emails
+         WHERE LOWER(to_email) = LOWER($1) AND campaign_id = $2 AND status IN ('SENT','BOUNCED','COMPLAINED')
+         ORDER BY sent_at DESC NULLS LAST LIMIT 1`,
+        [recipient, campaignId]
+      );
+      return r.rows[0] ? mapEmail(r.rows[0]) : null;
+    }
+    const r = await pool.query(
+      `SELECT * FROM emails
+       WHERE LOWER(to_email) = LOWER($1) AND status IN ('SENT','BOUNCED','COMPLAINED')
+       ORDER BY sent_at DESC NULLS LAST LIMIT 1`,
+      [recipient]
+    );
+    return r.rows[0] ? mapEmail(r.rows[0]) : null;
+  },
+
+  async recordOpen(emailId: string): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET opened_at = COALESCE(opened_at, NOW()), updated_at = NOW() WHERE id = $1",
+      [emailId]
+    );
+  },
+
+  async recordClick(emailId: string): Promise<void> {
+    await pool.query(
+      `UPDATE emails
+         SET clicked_at = COALESCE(clicked_at, NOW()),
+             opened_at  = COALESCE(opened_at, NOW()),
+             updated_at = NOW()
+       WHERE id = $1`,
+      [emailId]
+    );
+  },
+
+  async recordDelivered(emailId: string): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET delivered_at = COALESCE(delivered_at, NOW()), updated_at = NOW() WHERE id = $1",
+      [emailId]
+    );
+  },
+
+  async recordBounced(emailId: string, permanent: boolean): Promise<void> {
+    await pool.query(
+      `UPDATE emails
+         SET bounced_at = NOW(),
+             status = CASE WHEN $2 THEN 'BOUNCED' ELSE status END,
+             updated_at = NOW()
+       WHERE id = $1`,
+      [emailId, permanent]
+    );
+  },
+
+  async recordComplained(emailId: string): Promise<void> {
+    await pool.query(
+      `UPDATE emails
+         SET complained_at = NOW(),
+             status = 'COMPLAINED',
+             updated_at = NOW()
+       WHERE id = $1`,
+      [emailId]
+    );
+  },
+
+  async recordReplyReceived(emailId: string): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET reply_received_at = COALESCE(reply_received_at, NOW()), updated_at = NOW() WHERE id = $1",
+      [emailId]
+    );
+  },
+
+  async markUnsubscribeToken(emailId: string, token: string): Promise<void> {
+    await pool.query(
+      "UPDATE emails SET unsubscribe_token = $1, updated_at = NOW() WHERE id = $2",
+      [token, emailId]
+    );
+  },
+
+  async listPastRecipientForFollowUp(
+    campaignId: string,
+    recipient: string
+  ): Promise<{ hasReply: boolean; latestStep: number }> {
+    const r = await pool.query(
+      `SELECT reply_received_at, follow_up_step FROM emails
+       WHERE LOWER(to_email) = LOWER($1) AND campaign_id = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [recipient, campaignId]
+    );
+    if (!r.rows[0]) return { hasReply: false, latestStep: 0 };
+    return {
+      hasReply: !!r.rows[0].reply_received_at,
+      latestStep: r.rows[0].follow_up_step || 0,
+    };
   },
 };
 

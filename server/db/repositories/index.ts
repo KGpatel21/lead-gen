@@ -27,3 +27,18 @@ export type { BusinessProfile, FirecrawlStatus, UpsertProfileInput } from "./bus
 export { placesCacheRepository, firecrawlCacheRepository } from "./cache.repository";
 export { emailRepository, emailEventRepository } from "./email.repository";
 export type { Email, EmailStatus, CreateEmailInput } from "./email.repository";
+
+// Phase 3
+export { senderIdentityRepository } from "./senderIdentity.repository";
+export type {
+  SenderIdentity,
+  CreateSenderIdentityInput,
+  SesIdentityType,
+  SesVerificationStatus,
+} from "./senderIdentity.repository";
+export { suppressionRepository } from "./suppression.repository";
+export type { Suppression, AddSuppressionInput, SuppressionReason } from "./suppression.repository";
+export { followUpRuleRepository } from "./followUp.repository";
+export type { FollowUpRule } from "./followUp.repository";
+export { templateVersionRepository } from "./templateVersion.repository";
+export type { TemplateVersion } from "./templateVersion.repository";

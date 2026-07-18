@@ -12,6 +12,10 @@ import { SystemController } from "../controllers/system.controller";
 import { BillingController } from "../controllers/billing.controller";
 import { SyncController } from "../controllers/sync.controller";
 import { LeadDiscoveryController } from "../controllers/leadDiscovery.controller";
+import { SenderIdentityController } from "../controllers/senderIdentity.controller";
+import { SuppressionController } from "../controllers/suppression.controller";
+import { FollowUpController } from "../controllers/followUp.controller";
+import { TemplatesController } from "../controllers/templates.controller";
 import { authenticateJwt, requireRole } from "../middleware/auth.middleware";
 import { rateLimiter } from "../middleware/rateLimiter.middleware";
 import { csrfProtection } from "../middleware/csrf.middleware";
@@ -155,6 +159,33 @@ router.post("/campaign/:id/resume", authenticateJwt, LeadDiscoveryController.res
 router.post("/campaign/:id/cancel", authenticateJwt, LeadDiscoveryController.cancel);
 router.get("/campaign/:id", authenticateJwt, LeadDiscoveryController.getCampaign);
 router.get("/campaign/:id/stats", authenticateJwt, LeadDiscoveryController.getCampaignStats);
+router.get("/queue/email/stats", authenticateJwt, LeadDiscoveryController.queueStats);
+
+// --- SENDER IDENTITIES (Phase 3) ---
+router.get("/sender-identities", authenticateJwt, SenderIdentityController.list);
+router.post("/sender-identities", authenticateJwt, SenderIdentityController.create);
+router.post("/sender-identities/:id/refresh", authenticateJwt, SenderIdentityController.refresh);
+router.post("/sender-identities/:id/active", authenticateJwt, SenderIdentityController.setActive);
+router.delete("/sender-identities/:id", authenticateJwt, SenderIdentityController.delete);
+
+// --- SUPPRESSION LIST (Phase 3) ---
+router.get("/suppressions", authenticateJwt, SuppressionController.list);
+router.post("/suppressions", authenticateJwt, SuppressionController.add);
+router.delete("/suppressions/:email", authenticateJwt, SuppressionController.remove);
+
+// --- FOLLOW-UP RULES (Phase 3) ---
+router.get("/campaign/:campaignId/follow-ups", authenticateJwt, FollowUpController.list);
+router.post("/campaign/:campaignId/follow-ups/ensure-defaults", authenticateJwt, FollowUpController.ensureDefaults);
+router.post("/campaign/:campaignId/follow-ups", authenticateJwt, FollowUpController.setRule);
+
+// --- TEMPLATES (Phase 3 — extends /templates from earlier phases) ---
+router.get("/templates/v2", authenticateJwt, TemplatesController.list);
+router.post("/templates/v2", authenticateJwt, TemplatesController.create);
+router.put("/templates/v2/:id", authenticateJwt, TemplatesController.update);
+router.post("/templates/v2/:id/duplicate", authenticateJwt, TemplatesController.duplicate);
+router.post("/templates/v2/:id/preview", authenticateJwt, TemplatesController.preview);
+router.get("/templates/v2/:id/history", authenticateJwt, TemplatesController.history);
+router.delete("/templates/v2/:id", authenticateJwt, TemplatesController.remove);
 
 // --- BILLING & SUBSCRIPTIONS ---
 router.post("/billing/checkout", authenticateJwt, BillingController.createCheckoutSession);

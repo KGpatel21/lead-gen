@@ -362,6 +362,101 @@ const STATEMENTS: string[] = [
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
   `CREATE INDEX IF NOT EXISTS idx_email_events_email ON email_events (email_id, occurred_at DESC)`,
+
+  // ---- Phase 3: production email infrastructure ----
+
+  // Verified SES sender identities (rotation pool)
+  `CREATE TABLE IF NOT EXISTS sender_identities (
+    id                       VARCHAR PRIMARY KEY,
+    email                    VARCHAR NOT NULL,
+    display_name             VARCHAR,
+    from_domain              VARCHAR,
+    ses_identity_type        VARCHAR NOT NULL DEFAULT 'EMAIL',
+    ses_verification_status  VARCHAR NOT NULL DEFAULT 'PENDING',
+    daily_send_limit         INTEGER NOT NULL DEFAULT 200,
+    sent_today               INTEGER NOT NULL DEFAULT 0,
+    sent_today_reset_on      DATE,
+    reputation_score         REAL NOT NULL DEFAULT 100,
+    bounce_count             INTEGER NOT NULL DEFAULT 0,
+    complaint_count          INTEGER NOT NULL DEFAULT 0,
+    delivery_count           INTEGER NOT NULL DEFAULT 0,
+    last_used_at             TIMESTAMPTZ,
+    is_active                BOOLEAN NOT NULL DEFAULT TRUE,
+    is_healthy               BOOLEAN NOT NULL DEFAULT TRUE,
+    last_error               TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at               TIMESTAMPTZ
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_identities_email_active
+     ON sender_identities (LOWER(email)) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_sender_identities_rotation
+     ON sender_identities (is_active, is_healthy, last_used_at NULLS FIRST)
+     WHERE deleted_at IS NULL`,
+
+  // Permanent suppression list (bounce / complaint / unsubscribe / manual)
+  `CREATE TABLE IF NOT EXISTS email_suppressions (
+    id             VARCHAR PRIMARY KEY,
+    email          VARCHAR NOT NULL,
+    reason         VARCHAR NOT NULL,
+    bounce_type    VARCHAR,
+    bounce_subtype VARCHAR,
+    source         VARCHAR,
+    notes          TEXT,
+    campaign_id    VARCHAR REFERENCES campaigns(id) ON DELETE SET NULL,
+    suppressed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_email_suppressions_email
+     ON email_suppressions (LOWER(email))`,
+
+  // Extend `emails` table with tracking + follow-up columns.
+  // ADD COLUMN IF NOT EXISTS is a Postgres 9.6+ feature and idempotent.
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS sender_identity_id VARCHAR REFERENCES sender_identities(id)`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS follow_up_of VARCHAR REFERENCES emails(id) ON DELETE SET NULL`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS follow_up_step INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS clicked_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS bounced_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS complained_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS reply_received_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS unsubscribe_token VARCHAR`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_unsubscribe_token
+     ON emails (unsubscribe_token) WHERE unsubscribe_token IS NOT NULL`,
+
+  // Follow-up rules per campaign (Day 3 / 7 / 14 by default)
+  `CREATE TABLE IF NOT EXISTS follow_up_rules (
+    id            VARCHAR PRIMARY KEY,
+    campaign_id   VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    step          INTEGER NOT NULL,
+    delay_days    INTEGER NOT NULL,
+    subject_prefix VARCHAR,
+    body_instruction TEXT,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_follow_up_rules_step
+     ON follow_up_rules (campaign_id, step)`,
+
+  // Email template versions (append-only history of template edits)
+  `CREATE TABLE IF NOT EXISTS template_versions (
+    id            VARCHAR PRIMARY KEY,
+    template_id   VARCHAR NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    name          VARCHAR NOT NULL,
+    subject       TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    variables     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    changed_by    VARCHAR,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_template_versions
+     ON template_versions (template_id, version)`,
+
+  // Extend templates table with variables and updated timestamp
+  `ALTER TABLE templates ADD COLUMN IF NOT EXISTS variables JSONB NOT NULL DEFAULT '[]'::jsonb`,
+  `ALTER TABLE templates ADD COLUMN IF NOT EXISTS current_version INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 ];
 
 export async function runMigrations(): Promise<void> {

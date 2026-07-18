@@ -255,6 +255,8 @@ server refuses to start if a required variable is missing.
 | `AWS_REGION`                 | SES delivery        | Default `us-east-1`                                 |
 | `SES_FROM_EMAIL`             | SES delivery        | Verified sender identity                            |
 | `SES_CONFIGURATION_SET`      | SES optional        | Config set for event publishing (SNS/CloudWatch)    |
+| `PUBLIC_BASE_URL`            | Tracking (Phase 3)  | Base URL email pixels + unsubscribe links point at  |
+| `EMAIL_WORKER_CONCURRENCY`   | BullMQ (Phase 3)    | Send-worker parallelism (default 3)                 |
 | `STRIPE_SECRET_KEY`          | billing             | Enables checkout / portal / webhook                 |
 | `STRIPE_WEBHOOK_SECRET`      | billing             | Verifies Stripe webhook signatures                  |
 | `STRIPE_PRICE_FREE_ID`       | billing             | Price ID for the Free tier subscription             |
@@ -445,14 +447,45 @@ POST   /api/autopilot/dispatch                    (legacy) Gemini reasoning-only
 # Lead Discovery pipeline (primary)
 POST   /api/leads/search                          Google Places search (real businesses)
 POST   /api/business/analyze                      Firecrawl per business (real scrape)
-POST   /api/email/generate                        Gemini reasoning-only per business
+POST   /api/email/generate                        Groq reasoning-only per business
 POST   /api/campaign/create                       New campaign wrapping N businesses
-POST   /api/campaign/:id/send                     Amazon SES batch send
+POST   /api/campaign/:id/send                     Enqueue via BullMQ (Phase 3)
 POST   /api/campaign/:id/pause                    Pause queued sends
 POST   /api/campaign/:id/resume                   Resume queued sends
 POST   /api/campaign/:id/cancel                   Cancel remaining sends
 GET    /api/campaign/:id                          Campaign + all emails
 GET    /api/campaign/:id/stats                    Delivery counters
+GET    /api/queue/email/stats                     BullMQ job counts
+
+# Phase 3 email-infrastructure surface
+GET    /api/sender-identities                     List rotating senders
+POST   /api/sender-identities                     Create a verified identity
+POST   /api/sender-identities/:id/refresh         Re-query SES verification status
+POST   /api/sender-identities/:id/active          Enable/disable in the rotation
+DELETE /api/sender-identities/:id                 Soft-delete a sender
+
+GET    /api/suppressions                          List suppression entries
+POST   /api/suppressions                          Manually suppress an address
+DELETE /api/suppressions/:email                   Remove from suppression list
+
+GET    /api/campaign/:id/follow-ups               List Day-3 / Day-7 / Day-14 rules
+POST   /api/campaign/:id/follow-ups/ensure-defaults
+POST   /api/campaign/:id/follow-ups               Upsert a rule
+
+GET    /api/templates/v2                          Templates with variables + version history
+POST   /api/templates/v2
+PUT    /api/templates/v2/:id                      (auto-records history)
+POST   /api/templates/v2/:id/preview              Render with variable values
+GET    /api/templates/v2/:id/history              All prior versions
+POST   /api/templates/v2/:id/duplicate            Clone as new template
+DELETE /api/templates/v2/:id                      Soft delete
+
+# Public endpoints hit by email clients (unauthenticated)
+POST   /api/ses/events                            SNS webhook (signature-verified)
+GET    /t/o/:token                                Open tracking pixel
+GET    /t/c/:token                                Click redirect
+GET    /unsubscribe/:token                        HTML confirmation
+POST   /unsubscribe/:token                        RFC 8058 one-click list-unsubscribe
 
 GET    /api/queue
 POST   /api/queue/:id/retry

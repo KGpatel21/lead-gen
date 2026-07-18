@@ -26,6 +26,8 @@ import apiRouter from "./server/routes/api.routes";
 import { queueWorker } from "./server/workers/queue.worker";
 import { webSocketService } from "./server/services/websocket.service";
 import { queueRepository, campaignRepository, replyRepository, smtpRepository, auditRepository } from "./server/db/repositories";
+import { SesEventsController } from "./server/controllers/sesEvents.controller";
+import { TrackingController } from "./server/controllers/tracking.controller";
 
 const app = express();
 const server = http.createServer(app);
@@ -36,8 +38,21 @@ app.use("/api/billing/webhook", express.raw({ type: "application/json" }), (req,
   next();
 });
 
+// Amazon SNS posts JSON with Content-Type: text/plain. Accept both flavors.
+app.post(
+  "/api/ses/events",
+  express.text({ type: "*/*", limit: "1mb" }),
+  SesEventsController.handle.bind(SesEventsController)
+);
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Public tracking + unsubscribe endpoints (email clients hit these directly).
+app.get("/t/o/:token", TrackingController.open.bind(TrackingController));
+app.get("/t/c/:token", TrackingController.click.bind(TrackingController));
+app.get("/unsubscribe/:token", TrackingController.unsubscribe.bind(TrackingController));
+app.post("/unsubscribe/:token", TrackingController.unsubscribe.bind(TrackingController));
 
 app.use("/api", apiRouter);
 app.use("/api/v1", apiRouter);
@@ -194,6 +209,12 @@ async function startFullStackServer(): Promise<void> {
 
   webSocketService.initialize(server);
   queueWorker.startWorkerInterval();
+
+  // BullMQ workers: start with the process. Constructors are side-effectful,
+  // so importing here is what registers them with the queue.
+  await import("./server/queues/emailSend.worker");
+  await import("./server/queues/followUp.worker");
+  console.log("[boot] BullMQ workers started (email-send, follow-up)");
 
   server.listen(config.port, "0.0.0.0", () => {
     console.log(`[boot] server listening on http://localhost:${config.port}`);

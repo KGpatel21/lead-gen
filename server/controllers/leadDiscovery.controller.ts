@@ -17,6 +17,8 @@ import { placesService, PlacesNotConfiguredError } from "../services/places.serv
 import { firecrawlService, FirecrawlNotConfiguredError } from "../services/firecrawl.service";
 import { sesService, SesNotConfiguredError } from "../services/ses.service";
 import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
+import { enqueueCampaign, pauseCampaign, resumeCampaign, cancelCampaign, queueStats } from "../queues/emailQueue";
+import { followUpRuleRepository } from "../db/repositories";
 import { logAudit } from "../services/db.service";
 import { CampaignStatus } from "../../src/types";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
@@ -280,9 +282,9 @@ export class LeadDiscoveryController {
 
   /**
    * POST /api/campaign/:id/send
-   * Sends every READY / RETRY email in the campaign via Amazon SES.
-   * Sequential to respect account send-rate; production usage should
-   * back this by BullMQ once Phase-2 queue lands.
+   * Enqueues every READY / RETRY email onto the BullMQ email-send queue.
+   * Sends are executed asynchronously by the emailSend worker; this endpoint
+   * returns as soon as the jobs are queued.
    */
   public static async send(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id: campaignId } = req.params;
@@ -294,56 +296,47 @@ export class LeadDiscoveryController {
     if (!sesService.isConfigured()) {
       res.status(503).json({
         success: false,
-        error: "SES not fully configured (need AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SES_FROM_EMAIL).",
+        error: "SES not configured (need AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).",
       });
       return;
     }
-    const queue = await emailRepository.listReadyForCampaign(campaignId);
-    if (queue.length === 0) {
-      res.json({ success: true, message: "No READY emails to send.", sent: 0, failed: 0 });
-      return;
-    }
-    await campaignRepository.setStatus(campaignId, CampaignStatus.RUNNING);
-    let sent = 0, failed = 0;
-    for (const email of queue) {
-      if (!email.toEmail) {
-        await emailRepository.setStatus(email.id, "FAILED", { errorMessage: "No destination email on file." });
-        failed++; continue;
-      }
-      try {
-        await sesService.sendEmailRow(email);
-        await campaignRepository.incrementCounters(campaignId, { sentCount: 1 });
-        sent++;
-      } catch (err) {
-        failed++;
-        console.warn("[send] SES failed for", email.id, (err as Error).message);
-      }
-    }
-    await logAudit(`SES campaign send: ${campaign.name}`, "SMTP", {
+
+    // Seed default follow-up rules when the campaign is first sent.
+    await followUpRuleRepository.ensureDefaults(campaignId);
+
+    const enqueued = await enqueueCampaign(campaignId, {
+      reason: "initial",
+      priority: 2,
+      orgName: campaign.name,
+    });
+
+    await logAudit(`SES campaign enqueue: ${campaign.name}`, "SMTP", {
       userId: req.user?.id,
       userEmail: req.user?.email,
-      details: `sent=${sent} failed=${failed}`,
+      details: `enqueued=${enqueued}`,
       ipAddress: req.ip,
     });
-    res.json({ success: true, sent, failed, total: queue.length });
+    res.json({ success: true, enqueued, campaignId });
   }
 
   public static async pause(req: Request, res: Response): Promise<void> {
-    const paused = await emailRepository.pauseAllForCampaign(req.params.id);
-    await campaignRepository.setStatus(req.params.id, CampaignStatus.PAUSED);
+    const { paused } = await pauseCampaign(req.params.id);
     res.json({ success: true, paused });
   }
 
   public static async resume(req: Request, res: Response): Promise<void> {
-    const resumed = await emailRepository.resumeAllForCampaign(req.params.id);
-    await campaignRepository.setStatus(req.params.id, CampaignStatus.RUNNING);
+    const { resumed } = await resumeCampaign(req.params.id);
     res.json({ success: true, resumed });
   }
 
   public static async cancel(req: Request, res: Response): Promise<void> {
-    const cancelled = await emailRepository.cancelAllForCampaign(req.params.id);
-    await campaignRepository.setStatus(req.params.id, CampaignStatus.COMPLETED);
-    res.json({ success: true, cancelled });
+    const { cancelled, removedJobs } = await cancelCampaign(req.params.id);
+    res.json({ success: true, cancelled, removedJobs });
+  }
+
+  public static async queueStats(_req: Request, res: Response): Promise<void> {
+    const stats = await queueStats();
+    res.json({ success: true, stats });
   }
 
   public static async getCampaign(req: Request, res: Response): Promise<void> {

@@ -49,6 +49,8 @@ interface AppConfig {
   awsRegion: string;
   sesFromEmail: string | null;
   sesConfigurationSet: string | null;
+  /** Public base URL used to build tracking + unsubscribe links in outbound HTML. */
+  publicBaseUrl: string;
 }
 
 function required(name: string): string {
@@ -113,6 +115,7 @@ export const config: AppConfig = {
   awsRegion: process.env.AWS_REGION?.trim() || "us-east-1",
   sesFromEmail: optional("SES_FROM_EMAIL"),
   sesConfigurationSet: optional("SES_CONFIGURATION_SET"),
+  publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || process.env.APP_URL?.trim() || "http://localhost:3000",
 };
 
 if (config.jwtSecret.length < 24) {
