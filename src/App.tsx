@@ -19,6 +19,7 @@ import AiLeadFinderView from "./components/AiLeadFinderView";
 import CrmBoardView from "./components/CrmBoardView";
 import EnterpriseConsole from "./components/EnterpriseConsole";
 import LeadDiscoveryView from "./components/LeadDiscoveryView";
+import SequenceBuilderView from "./components/SequenceBuilderView";
 import LoginPage from "./components/LoginPage";
 
 import {
@@ -262,6 +263,8 @@ function AuthedApp() {
             onUpdateCampaign={handleUpdateCampaign}
           />
         );
+      case "sequences":
+        return <SequenceBuilderView campaigns={campaigns} onRefresh={fetchAllSaaSData} />;
       case "smtp":
         return (
           <InboxesView

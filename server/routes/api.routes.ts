@@ -19,6 +19,8 @@ import { OAuthController } from "../controllers/oauth.controller";
 import { SuppressionController } from "../controllers/suppression.controller";
 import { FollowUpController } from "../controllers/followUp.controller";
 import { TemplatesController } from "../controllers/templates.controller";
+import { CampaignAutomationController } from "../controllers/campaignAutomation.controller";
+import { CampaignDashboardController } from "../controllers/campaignDashboard.controller";
 import { authenticateJwt, requireRole } from "../middleware/auth.middleware";
 import { workspaceContextMiddleware } from "../middleware/workspaceContext.middleware";
 import { rateLimiter } from "../middleware/rateLimiter.middleware";
@@ -209,6 +211,34 @@ router.get("/oauth/google/start", authenticateJwt, OAuthController.googleStart);
 router.get("/oauth/google/callback", OAuthController.googleCallback);
 router.get("/oauth/microsoft/start", authenticateJwt, OAuthController.microsoftStart);
 router.get("/oauth/microsoft/callback", OAuthController.microsoftCallback);
+
+// --- CAMPAIGN AUTOMATION ENGINE (Phase 5) ---
+// Sequences
+router.get("/campaigns/:id/sequence", ...authWithWorkspace, CampaignAutomationController.listSteps);
+router.put("/campaigns/:id/sequence", ...authWithWorkspace, CampaignAutomationController.replaceSteps);
+router.post("/campaigns/:id/sequence/steps", ...authWithWorkspace, CampaignAutomationController.upsertStep);
+router.delete("/campaigns/:id/sequence/steps/:stepId", ...authWithWorkspace, CampaignAutomationController.deleteStep);
+// Prospects
+router.get("/campaigns/:id/prospects", ...authWithWorkspace, CampaignAutomationController.listProspects);
+router.post("/campaigns/:id/prospects/enroll", ...authWithWorkspace, CampaignAutomationController.enrollLeads);
+router.post("/campaigns/prospects/:prospectId/skip", ...authWithWorkspace, CampaignAutomationController.skipLead);
+router.post("/campaigns/prospects/:prospectId/force-next", ...authWithWorkspace, CampaignAutomationController.forceNextStep);
+router.get("/campaigns/prospects/:prospectId/preview-next", ...authWithWorkspace, CampaignAutomationController.previewNext);
+// Lifecycle
+router.post("/campaigns/:id/pause", ...authWithWorkspace, CampaignAutomationController.pause);
+router.post("/campaigns/:id/resume", ...authWithWorkspace, CampaignAutomationController.resume);
+router.post("/campaigns/:id/clone", ...authWithWorkspace, CampaignAutomationController.clone);
+router.post("/campaigns/:id/archive", ...authWithWorkspace, CampaignAutomationController.archive);
+router.post("/campaigns/:id/unarchive", ...authWithWorkspace, CampaignAutomationController.unarchive);
+router.post("/campaigns/:id/delete", ...authWithWorkspace, CampaignAutomationController.deleteCampaign);
+router.post("/emails/:emailId/cancel", ...authWithWorkspace, CampaignAutomationController.cancelQueued);
+// Holidays
+router.get("/campaigns/:id/holidays", ...authWithWorkspace, CampaignAutomationController.listHolidays);
+router.post("/campaigns/:id/holidays", ...authWithWorkspace, CampaignAutomationController.addHoliday);
+router.delete("/campaigns/holidays/:holidayId", ...authWithWorkspace, CampaignAutomationController.removeHoliday);
+// Dashboards
+router.get("/campaigns/dashboard", ...authWithWorkspace, CampaignDashboardController.workspace);
+router.get("/campaigns/:id/dashboard", ...authWithWorkspace, CampaignDashboardController.oneCampaign);
 
 // --- SUPPRESSION LIST (Phase 3) ---
 router.get("/suppressions", authenticateJwt, SuppressionController.list);

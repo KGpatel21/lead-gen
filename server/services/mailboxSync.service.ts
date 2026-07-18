@@ -20,6 +20,7 @@ import { emailAccountRepository, mailboxSyncStateRepository, replyRepository } f
 import { pool } from "../db/pool";
 import { getReaderFor, IncomingMessage } from "../providers/mailbox";
 import { replyClassifierService } from "./replyClassifier.service";
+import { stopConditionService } from "./stopCondition.service";
 import { log } from "../observability/logger";
 
 export interface MailboxSyncSummary {
@@ -140,8 +141,10 @@ export const mailboxSyncService = {
         }
 
         // Classify — non-fatal on failure.
+        let isMeeting = false;
         try {
           const cls = await replyClassifierService.classify(msg.bodyText || msg.subject, msg.subject);
+          isMeeting = cls.category === "Meeting Requested";
           await replyRepository.applyClassification(up.id, {
             category: cls.category,
             sentiment: cls.sentiment,
@@ -151,6 +154,24 @@ export const mailboxSyncService = {
           summary.classified++;
         } catch (err: any) {
           log.warn({ replyId: up.id, err: err?.message }, "mailboxSync: classification failed");
+        }
+
+        // Phase 5: proactively stop any active campaign prospects for this
+        // recipient so follow-ups suppress themselves the moment a reply
+        // arrives, not on the next scheduled tick.
+        if (msg.from) {
+          try {
+            await stopConditionService.onReplyReceived(
+              account.workspaceId,
+              msg.from,
+              isMeeting
+            );
+          } catch (err: any) {
+            log.warn(
+              { err: err?.message, replyId: up.id },
+              "mailboxSync: stopCondition.onReplyReceived failed"
+            );
+          }
         }
       } catch (err: any) {
         summary.errors++;

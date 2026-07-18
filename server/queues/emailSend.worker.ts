@@ -10,10 +10,12 @@
 import { Worker } from "bullmq";
 import { bullConnection } from "./connection";
 import { EMAIL_QUEUE_NAME, EmailSendJobData } from "./emailQueue";
-import { emailRepository, followUpRuleRepository } from "../db/repositories";
+import { emailRepository, followUpRuleRepository, campaignRepository } from "../db/repositories";
 import { emailDispatchService, RecipientSuppressedError, NoSenderAvailableError } from "../services/emailDispatch.service";
 import { EmailProviderNotConfiguredError } from "../providers/email";
 import { scheduleFollowUp } from "./followUpQueue";
+import { retryPolicyService } from "../services/retryPolicy.service";
+import { pool } from "../db/pool";
 
 const CONCURRENCY = parseInt(process.env.EMAIL_WORKER_CONCURRENCY || "3", 10);
 
@@ -53,7 +55,41 @@ emailSendWorker.on("failed", async (job, err) => {
   if (err instanceof NoSenderAvailableError) {
     // Delay and try again — a fresh sender might rotate in.
     await job.moveToDelayed(Date.now() + 5 * 60_000, "no-sender").catch(() => { /* ignore */ });
+    return;
   }
+
+  // Phase 5: campaign-level retry policy with exponential backoff.
+  try {
+    const emailId = job.data?.emailId;
+    if (!emailId) return;
+    const email = await emailRepository.findById(emailId);
+    if (!email) return;
+    let maxRetries = 5;
+    if (email.campaignId) {
+      const camp = await campaignRepository.findById(email.campaignId);
+      maxRetries = (camp as any)?.maxRetries ?? 5;
+    }
+    const retryCount = (email as any).retryCount ?? 0;
+    const decision = retryPolicyService.shouldRetry(retryCount, maxRetries, err);
+    if (decision.retry) {
+      await pool.query(
+        `UPDATE emails
+           SET retry_count = retry_count + 1,
+               next_retry_at = NOW() + ($1::int || ' milliseconds')::interval,
+               last_provider_error = $2,
+               status = 'RETRY',
+               updated_at = NOW()
+         WHERE id = $3`,
+        [decision.delayMs, String(err?.message || "").slice(0, 500), email.id]
+      );
+      await job.moveToDelayed(Date.now() + decision.delayMs, "retry").catch(() => { /* ignore */ });
+    } else {
+      await pool.query(
+        `UPDATE emails SET last_provider_error = $1, updated_at = NOW() WHERE id = $2`,
+        [String(err?.message || "").slice(0, 500), email.id]
+      );
+    }
+  } catch { /* swallow — retry accounting must not crash the worker */ }
 });
 
 async function seedFollowUps(

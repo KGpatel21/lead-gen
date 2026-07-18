@@ -697,6 +697,132 @@ const STATEMENTS: string[] = [
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_mailbox_sync_account ON mailbox_sync_state (account_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mailbox_sync_workspace ON mailbox_sync_state (workspace_id)`,
+
+  // =================================================================
+  // Phase 5: Campaign Automation Engine.
+  // Multi-step sequences, per-prospect state, working calendar,
+  // rotation state, campaign-level scheduler config.
+  // Every addition is additive; no destructive changes.
+  // =================================================================
+
+  // Extend campaigns for the automation engine.
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_per_hour INTEGER NOT NULL DEFAULT 60`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_per_day  INTEGER NOT NULL DEFAULT 500`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS min_gap_seconds INTEGER NOT NULL DEFAULT 45`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_gap_seconds INTEGER NOT NULL DEFAULT 180`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS respect_prospect_tz BOOLEAN NOT NULL DEFAULT TRUE`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS default_tone VARCHAR NOT NULL DEFAULT 'Consultative'`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS goal TEXT`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 5`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
+
+  // Sequence steps: unlimited ordered steps per campaign.
+  //  step_index      0-based; step 0 is the initial email.
+  //  delay_hours     hours since the previous step (or campaign start for step 0).
+  //  mode            'ai' | 'manual'
+  //  subject/body    literal template used when mode='manual', or the seed prompt
+  //                  used when mode='ai'.
+  //  ai_instruction  extra guidance for the AI writer (e.g. "polite break-up").
+  //  ab_group        optional A/B tag; workers pick a variant per prospect.
+  //  sender_pool_id  optional override for this step.
+  //  account_id      optional pin to a single sender for this step.
+  `CREATE TABLE IF NOT EXISTS sequence_steps (
+    id             VARCHAR PRIMARY KEY,
+    workspace_id   VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id    VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    step_index     INTEGER NOT NULL,
+    ab_group       VARCHAR NOT NULL DEFAULT 'A',
+    delay_hours    INTEGER NOT NULL DEFAULT 0,
+    mode           VARCHAR NOT NULL DEFAULT 'ai',
+    subject        TEXT,
+    body_text      TEXT,
+    body_html      TEXT,
+    ai_instruction TEXT,
+    sender_pool_id VARCHAR REFERENCES sender_pools(id) ON DELETE SET NULL,
+    account_id     VARCHAR REFERENCES email_accounts(id) ON DELETE SET NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_sequence_steps
+     ON sequence_steps (campaign_id, step_index, ab_group)`,
+  `CREATE INDEX IF NOT EXISTS idx_sequence_steps_workspace
+     ON sequence_steps (workspace_id) WHERE is_active = TRUE`,
+
+  // Prospect journey through a campaign: exactly one row per (campaign, lead).
+  //  current_step        0-based index of the NEXT step to send.
+  //  status              'active' | 'paused' | 'stopped' | 'completed'.
+  //  stop_reason         when status = 'stopped', why: replied / meeting /
+  //                      unsubscribed / bounced / complained / manual / paused /
+  //                      closed. Free-form so future reasons are additive.
+  //  timezone            resolved prospect tz (falls back to campaign tz).
+  //  next_send_at        the scheduler's next send window for this prospect.
+  //  ab_group            'A' or 'B' — sticky per prospect.
+  `CREATE TABLE IF NOT EXISTS campaign_prospects (
+    id             VARCHAR PRIMARY KEY,
+    workspace_id   VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id    VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    lead_id        VARCHAR NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+    business_id    VARCHAR REFERENCES businesses(id) ON DELETE SET NULL,
+    current_step   INTEGER NOT NULL DEFAULT 0,
+    status         VARCHAR NOT NULL DEFAULT 'active',
+    stop_reason    VARCHAR,
+    ab_group       VARCHAR NOT NULL DEFAULT 'A',
+    timezone       VARCHAR,
+    next_send_at   TIMESTAMPTZ,
+    last_sent_at   TIMESTAMPTZ,
+    last_error     TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_prospect
+     ON campaign_prospects (campaign_id, lead_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_campaign_prospects_ws_status
+     ON campaign_prospects (workspace_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_campaign_prospects_next_send
+     ON campaign_prospects (next_send_at)
+     WHERE status = 'active' AND next_send_at IS NOT NULL`,
+
+  // Business holidays: skip sends on these dates.
+  //  scope: 'global' (workspace-level) or 'campaign'.
+  `CREATE TABLE IF NOT EXISTS campaign_holidays (
+    id             VARCHAR PRIMARY KEY,
+    workspace_id   VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id    VARCHAR REFERENCES campaigns(id) ON DELETE CASCADE,
+    scope          VARCHAR NOT NULL DEFAULT 'campaign',
+    date           DATE NOT NULL,
+    name           VARCHAR,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_holidays_camp
+     ON campaign_holidays (campaign_id, date) WHERE campaign_id IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_holidays_ws
+     ON campaign_holidays (workspace_id, date) WHERE scope = 'global'`,
+
+  // Rotation state per pool (round-robin cursor). Survives restarts.
+  `CREATE TABLE IF NOT EXISTS rotation_state (
+    id            VARCHAR PRIMARY KEY,
+    pool_id       VARCHAR NOT NULL REFERENCES sender_pools(id) ON DELETE CASCADE,
+    workspace_id  VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    last_account_id VARCHAR REFERENCES email_accounts(id) ON DELETE SET NULL,
+    cursor_index  INTEGER NOT NULL DEFAULT 0,
+    total_picks   BIGINT NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_rotation_state_pool
+     ON rotation_state (pool_id)`,
+
+  // Emails: extend for automation engine (retries, provider attempts, jitter).
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS last_provider_error TEXT`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS ab_group VARCHAR`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS sequence_step_index INTEGER`,
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS prospect_id VARCHAR REFERENCES campaign_prospects(id) ON DELETE SET NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_prospect ON emails (prospect_id)`,
+
+  // Leads: allow explicit tz per lead (used by the working-calendar scheduler).
+  `ALTER TABLE leads ADD COLUMN IF NOT EXISTS timezone VARCHAR`,
 ];
 
 export async function runMigrations(): Promise<void> {

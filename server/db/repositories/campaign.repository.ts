@@ -17,6 +17,17 @@ const ALLOWED_UPDATE_FIELDS: Record<string, string> = {
   timezone: "timezone",
   subjectTemplate: "subject_template",
   bodyTemplate: "body_template",
+  // Phase 5: automation engine columns.
+  maxPerHour: "max_per_hour",
+  maxPerDay: "max_per_day",
+  minGapSeconds: "min_gap_seconds",
+  maxGapSeconds: "max_gap_seconds",
+  respectProspectTz: "respect_prospect_tz",
+  defaultTone: "default_tone",
+  goal: "goal",
+  maxRetries: "max_retries",
+  senderPoolId: "sender_pool_id",
+  archivedAt: "archived_at",
 };
 
 export interface CreateCampaignInput {
@@ -160,5 +171,65 @@ export const campaignRepository = {
 
   async softDelete(id: string): Promise<void> {
     await pool.query("UPDATE campaigns SET deleted_at = NOW() WHERE id = $1", [id]);
+  },
+
+  async archive(id: string): Promise<void> {
+    await pool.query(
+      "UPDATE campaigns SET archived_at = COALESCE(archived_at, NOW()), updated_at = NOW() WHERE id = $1",
+      [id]
+    );
+  },
+
+  async unarchive(id: string): Promise<void> {
+    await pool.query(
+      "UPDATE campaigns SET archived_at = NULL, updated_at = NOW() WHERE id = $1",
+      [id]
+    );
+  },
+
+  /**
+   * Duplicate a campaign into a new draft. Copies all campaign columns
+   * plus every sequence step. Returns the new row.
+   * The caller is responsible for enrolling leads separately.
+   */
+  async clone(sourceId: string, workspaceId: string, newName: string): Promise<Campaign | null> {
+    const src = await this.findById(sourceId, workspaceId);
+    if (!src) return null;
+    const cloneName = newName?.trim() || `${src.name} (Copy)`;
+    const created = await this.create({
+      workspaceId,
+      name: cloneName,
+      subjectTemplate: src.subjectTemplate,
+      bodyTemplate: src.bodyTemplate,
+      scheduleDays: src.scheduleDays,
+      scheduleTimeStart: src.scheduleTimeStart,
+      scheduleTimeEnd: src.scheduleTimeEnd,
+      timezone: src.timezone,
+      status: CampaignStatus.DRAFT,
+    });
+    // Copy the automation columns that createCampaign doesn't take.
+    const carry = await pool.query(
+      `SELECT max_per_hour, max_per_day, min_gap_seconds, max_gap_seconds,
+              respect_prospect_tz, default_tone, goal, max_retries, sender_pool_id
+         FROM campaigns WHERE id = $1`,
+      [sourceId]
+    );
+    if (carry.rows[0]) {
+      const c = carry.rows[0];
+      await pool.query(
+        `UPDATE campaigns
+           SET max_per_hour = $1, max_per_day = $2, min_gap_seconds = $3,
+               max_gap_seconds = $4, respect_prospect_tz = $5, default_tone = $6,
+               goal = $7, max_retries = $8, sender_pool_id = $9,
+               updated_at = NOW()
+         WHERE id = $10`,
+        [
+          c.max_per_hour, c.max_per_day, c.min_gap_seconds, c.max_gap_seconds,
+          c.respect_prospect_tz, c.default_tone, c.goal, c.max_retries, c.sender_pool_id,
+          created.id,
+        ]
+      );
+    }
+    return this.findById(created.id, workspaceId);
   },
 };

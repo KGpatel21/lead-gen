@@ -49,3 +49,23 @@ export { followUpRuleRepository } from "./followUp.repository";
 export type { FollowUpRule } from "./followUp.repository";
 export { templateVersionRepository } from "./templateVersion.repository";
 export type { TemplateVersion } from "./templateVersion.repository";
+
+// Phase 5: campaign automation engine
+export { sequenceStepRepository } from "./sequenceStep.repository";
+export type {
+  SequenceStep,
+  SequenceStepMode,
+  CreateSequenceStepInput,
+  SequenceStepPatch,
+} from "./sequenceStep.repository";
+export { campaignProspectRepository } from "./campaignProspect.repository";
+export type {
+  CampaignProspect,
+  ProspectStatus,
+  StopReason,
+  EnrollInput,
+} from "./campaignProspect.repository";
+export { holidayRepository } from "./holiday.repository";
+export type { Holiday, HolidayScope } from "./holiday.repository";
+export { rotationStateRepository } from "./rotationState.repository";
+export type { RotationState } from "./rotationState.repository";

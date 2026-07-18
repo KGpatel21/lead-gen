@@ -39,6 +39,11 @@ import { SesEventsController } from "./server/controllers/sesEvents.controller";
 import { TrackingController } from "./server/controllers/tracking.controller";
 import { emailQueue, queueStats as bullmqQueueStats } from "./server/queues/emailQueue";
 import { followUpQueue } from "./server/queues/followUpQueue";
+import {
+  sequenceTickQueue,
+  sequenceAdvanceQueue,
+  scheduleSequenceTick,
+} from "./server/queues/sequenceTickQueue";
 
 const app = express();
 const server = http.createServer(app);
@@ -216,21 +221,31 @@ app.get("/health/workers", async (_req: Request, res: Response) => {
     .catch((e) => ({ error: e.message }));
   const bullmqFollowUp = await followUpQueue.getJobCounts("waiting", "active", "delayed", "completed", "failed", "prioritized")
     .catch((e) => ({ error: e.message }));
+  const bullmqTick = await sequenceTickQueue.getJobCounts("waiting", "active", "delayed", "completed", "failed", "prioritized")
+    .catch((e) => ({ error: e.message }));
+  const bullmqAdvance = await sequenceAdvanceQueue.getJobCounts("waiting", "active", "delayed", "completed", "failed", "prioritized")
+    .catch((e) => ({ error: e.message }));
   const emailQueueReady = (bullmqEmail as any).error ? false : true;
   const followUpQueueReady = (bullmqFollowUp as any).error ? false : true;
+  const tickQueueReady = (bullmqTick as any).error ? false : true;
+  const advanceQueueReady = (bullmqAdvance as any).error ? false : true;
   const legacySweepAgeMs = Date.now() - new Date(queueWorker.lastSweepTime).getTime();
 
-  const healthy = emailQueueReady && followUpQueueReady && legacySweepAgeMs < 60_000;
+  const healthy = emailQueueReady && followUpQueueReady && tickQueueReady && advanceQueueReady && legacySweepAgeMs < 60_000;
 
   res.status(healthy ? 200 : 503).json({
     healthy,
     workers: {
       email_send: emailQueueReady ? "UP" : "DOWN",
       follow_up: followUpQueueReady ? "UP" : "DOWN",
+      sequence_tick: tickQueueReady ? "UP" : "DOWN",
+      sequence_advance: advanceQueueReady ? "UP" : "DOWN",
       legacy_sweep: legacySweepAgeMs < 60_000 ? "UP" : `STALE (${Math.round(legacySweepAgeMs/1000)}s)`,
     },
     email_queue: bullmqEmail,
     follow_up_queue: bullmqFollowUp,
+    sequence_tick_queue: bullmqTick,
+    sequence_advance_queue: bullmqAdvance,
   });
 });
 
@@ -278,7 +293,10 @@ async function startFullStackServer(): Promise<void> {
   await import("./server/queues/emailSend.worker");
   await import("./server/queues/followUp.worker");
   await import("./server/queues/mailboxSync.worker");
-  log.info("BullMQ workers registered (email-send, follow-up, mailbox-sync)");
+  // Phase 5: sequence engine workers (tick + advance).
+  await import("./server/queues/sequenceTickQueue");
+  await scheduleSequenceTick();
+  log.info("BullMQ workers registered (email-send, follow-up, mailbox-sync, sequence-tick, sequence-advance)");
 
   // Schedule a repeatable poll for every non-SES account so replies get
   // synced without a user having to hit /sync-now.
@@ -348,10 +366,20 @@ async function gracefulShutdown(signal: string, timeoutMs = 30_000): Promise<voi
     } catch (err: any) {
       log.warn({ err: err?.message }, "bullmq mailbox-sync worker close error");
     }
+    try {
+      const { sequenceTickWorker, sequenceAdvanceWorker } = await import("./server/queues/sequenceTickQueue");
+      await sequenceTickWorker.close();
+      await sequenceAdvanceWorker.close();
+      log.info("bullmq sequence-tick + sequence-advance workers drained");
+    } catch (err: any) {
+      log.warn({ err: err?.message }, "bullmq sequence workers close error");
+    }
 
     // 3. Close BullMQ queues + shared redis + pg pool.
     try { await emailQueue.close(); } catch { /* ignore */ }
     try { await followUpQueue.close(); } catch { /* ignore */ }
+    try { await sequenceTickQueue.close(); } catch { /* ignore */ }
+    try { await sequenceAdvanceQueue.close(); } catch { /* ignore */ }
     try { await (redisService.getClient() as any).quit(); } catch { /* ignore */ }
     try { await pool.end(); } catch { /* ignore */ }
 

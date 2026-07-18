@@ -19,7 +19,8 @@ import {
   Moon,
   Search,
   Sliders,
-  LogOut
+  LogOut,
+  GitBranch
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -60,6 +61,7 @@ export default function Sidebar({ currentView, setView, activeCampaigns, theme, 
         { id: "crm", label: "CRM Pipeline Board", icon: Users2, badge: "LIVE" },
         { id: "lead-finder", label: "AI Lead Finder", icon: Search },
         { id: "campaigns", label: "Outreach Campaigns", icon: Mail, badge: activeCampaigns > 0 ? String(activeCampaigns) : undefined },
+        { id: "sequences", label: "Sequence Builder", icon: GitBranch, badge: "PRO" },
         { id: "smtp", label: "SMTP Accounts Router", icon: Inbox },
         { id: "domains", label: "DNS & Verified Domains", icon: Globe },
         { id: "replies", label: "Replies Intelligent Box", icon: Sparkles },

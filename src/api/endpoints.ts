@@ -202,6 +202,115 @@ export const queueApi = {
   clearFailed() { return api.del<void>("/api/queue/failed/all"); },
 };
 
+// ---- Campaign Automation (Phase 5) ----
+export interface SequenceStepDto {
+  id?: string;
+  stepIndex: number;
+  abGroup?: string;
+  delayHours?: number;
+  mode?: "ai" | "manual";
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  aiInstruction?: string;
+  senderPoolId?: string;
+  accountId?: string;
+  isActive?: boolean;
+}
+
+export interface CampaignDashboardSummary {
+  id: string;
+  name: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  buckets: Record<string, number>;
+  rates: Record<string, number>;
+  counts: Record<string, number>;
+  prospects: Record<string, number>;
+  stopReasons: Record<string, number>;
+  upcoming: { prospectId: string; step: number; when: string | null } | null;
+  currentStepMax: number;
+  perSender: Array<{
+    accountId: string; email: string; provider: string;
+    sent: number; opened: number; replied: number; bounced: number;
+    openRate: number; replyRate: number;
+  }>;
+  perProvider: Array<{
+    provider: string; sent: number; replied: number; bounced: number; replyRate: number;
+  }>;
+}
+
+export const campaignAutomationApi = {
+  listSteps(campaignId: string) {
+    return api.raw<{ success: boolean; steps: SequenceStepDto[] }>("GET", `/api/campaigns/${campaignId}/sequence`);
+  },
+  saveSteps(campaignId: string, steps: SequenceStepDto[]) {
+    return api.raw<{ success: boolean; steps: SequenceStepDto[] }>(
+      "PUT",
+      `/api/campaigns/${campaignId}/sequence`,
+      { steps }
+    );
+  },
+  upsertStep(campaignId: string, step: SequenceStepDto) {
+    return api.raw<{ success: boolean; step: SequenceStepDto }>(
+      "POST",
+      `/api/campaigns/${campaignId}/sequence/steps`,
+      step
+    );
+  },
+  deleteStep(campaignId: string, stepId: string) {
+    return api.raw<{ success: boolean }>("DELETE", `/api/campaigns/${campaignId}/sequence/steps/${stepId}`);
+  },
+  listProspects(campaignId: string) {
+    return api.raw<{ success: boolean; prospects: any[] }>("GET", `/api/campaigns/${campaignId}/prospects`);
+  },
+  enroll(campaignId: string, leadIds: string[] = []) {
+    return api.raw<{ success: boolean; enrolled: number; skipped: number }>(
+      "POST",
+      `/api/campaigns/${campaignId}/prospects/enroll`,
+      { leadIds }
+    );
+  },
+  skipLead(prospectId: string) {
+    return api.raw<{ success: boolean; prospect: any }>("POST", `/api/campaigns/prospects/${prospectId}/skip`);
+  },
+  forceNext(prospectId: string) {
+    return api.raw<{ success: boolean; jobId: string }>("POST", `/api/campaigns/prospects/${prospectId}/force-next`);
+  },
+  previewNext(prospectId: string) {
+    return api.raw<{ success: boolean; preview: any }>("GET", `/api/campaigns/prospects/${prospectId}/preview-next`);
+  },
+  pause(campaignId: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/pause`); },
+  resume(campaignId: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/resume`); },
+  clone(campaignId: string, name?: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/clone`, { name }); },
+  archive(campaignId: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/archive`); },
+  unarchive(campaignId: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/unarchive`); },
+  del(campaignId: string) { return api.raw<any>("POST", `/api/campaigns/${campaignId}/delete`); },
+  cancelEmail(emailId: string) { return api.raw<any>("POST", `/api/emails/${emailId}/cancel`); },
+  listHolidays(campaignId: string) {
+    return api.raw<{ success: boolean; holidays: any[] }>("GET", `/api/campaigns/${campaignId}/holidays`);
+  },
+  addHoliday(campaignId: string, date: string, name?: string, scope: "global" | "campaign" = "campaign") {
+    return api.raw<any>("POST", `/api/campaigns/${campaignId}/holidays`, { date, name, scope });
+  },
+  removeHoliday(holidayId: string) {
+    return api.raw<any>("DELETE", `/api/campaigns/holidays/${holidayId}`);
+  },
+  dashboardWorkspace() {
+    return api.raw<{ success: boolean; campaigns: CampaignDashboardSummary[]; queues: any }>(
+      "GET",
+      "/api/campaigns/dashboard"
+    );
+  },
+  dashboardCampaign(campaignId: string) {
+    return api.raw<{ success: boolean; dashboard: CampaignDashboardSummary }>(
+      "GET",
+      `/api/campaigns/${campaignId}/dashboard`
+    );
+  },
+};
+
 // ---- Automation / Autopilot ----
 export const automationApi = {
   trigger(task: string, campaignId?: string): Promise<any> {
