@@ -86,4 +86,101 @@ export const replyRepository = {
     for (const row of r.rows) out[row.sentiment] = row.n;
     return out;
   },
+
+  // ---------- Phase 4.5: universal reply sync ----------
+
+  /**
+   * Idempotent upsert of an incoming reply. Returns { row, isNew } — isNew
+   * is false when the (workspace_id, provider_message_id) unique index caught
+   * a repeat.
+   */
+  async upsertFromProvider(input: {
+    workspaceId: string;
+    accountId: string;
+    campaignId?: string;
+    leadId?: string;
+    providerMessageId: string;
+    internetMessageId?: string;
+    inReplyTo?: string;
+    references?: string;
+    threadId?: string;
+    folder?: string;
+    providerKind: string;
+    fromEmail: string;
+    fromName?: string;
+    subject: string;
+    bodyText: string;
+    bodyHtml?: string;
+    receivedAt: Date;
+    rawHeaders?: Record<string, unknown>;
+  }): Promise<{ id: string; isNew: boolean }> {
+    const id = `rep-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
+    const r = await pool.query(
+      `INSERT INTO replies
+        (id, workspace_id, email_account_id, campaign_id, lead_id, from_email, subject, body_text, body_html,
+         sentiment, provider_message_id, internet_message_id, in_reply_to, references_header,
+         thread_id, folder, provider_kind, raw_headers, received_at, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20)
+       ON CONFLICT (workspace_id, provider_message_id) WHERE provider_message_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [
+        id,
+        input.workspaceId,
+        input.accountId,
+        input.campaignId || null,
+        input.leadId || null,
+        input.fromEmail,
+        input.subject,
+        input.bodyText,
+        input.bodyHtml || null,
+        "Interested",                       // placeholder; classifier updates
+        input.providerMessageId,
+        input.internetMessageId || null,
+        input.inReplyTo || null,
+        input.references || null,
+        input.threadId || null,
+        input.folder || null,
+        input.providerKind,
+        JSON.stringify(input.rawHeaders || null),
+        input.receivedAt.toISOString(),
+        new Date().toISOString(),
+      ]
+    );
+    if (r.rowCount && r.rowCount > 0) return { id: r.rows[0].id, isNew: true };
+    const existing = await pool.query(
+      "SELECT id FROM replies WHERE workspace_id = $1 AND provider_message_id = $2",
+      [input.workspaceId, input.providerMessageId]
+    );
+    return { id: existing.rows[0]?.id || id, isNew: false };
+  },
+
+  async applyClassification(id: string, patch: {
+    category: string;
+    sentiment: string;
+    summary: string;
+    confidence: number;
+  }): Promise<void> {
+    await pool.query(
+      `UPDATE replies SET category = $1, sentiment = $2,
+              classification_summary = $3, sentiment_confidence = $4
+       WHERE id = $5`,
+      [patch.category, patch.sentiment, patch.summary, patch.confidence, id]
+    );
+  },
+
+  async findLinkedEmailByInReplyTo(workspaceId: string, inReplyTo: string): Promise<{ id: string; campaignId?: string; toEmail: string } | null> {
+    // Match against `emails` where the sent message's internet message id is
+    // encoded in the tracking id (X-Email-Id). SES/Gmail/Outlook return
+    // provider ids — we correlate via header. For now, match by subject or
+    // by a heuristic search: parent's Message-ID equals in_reply_to.
+    // Fallback: match by recipient's fromEmail => emails.toEmail.
+    const r = await pool.query(
+      `SELECT id, campaign_id, to_email FROM emails
+       WHERE workspace_id = $1 AND (message_id = $2 OR id = $2)
+       ORDER BY sent_at DESC NULLS LAST LIMIT 1`,
+      [workspaceId, inReplyTo]
+    );
+    if (!r.rows[0]) return null;
+    return { id: r.rows[0].id, campaignId: r.rows[0].campaign_id || undefined, toEmail: r.rows[0].to_email };
+  },
 };

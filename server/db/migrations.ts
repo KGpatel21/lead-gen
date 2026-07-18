@@ -648,6 +648,55 @@ const STATEMENTS: string[] = [
   // dashboards can show true opens vs prefetches.
   `ALTER TABLE emails ADD COLUMN IF NOT EXISTS first_open_user_agent VARCHAR`,
   `ALTER TABLE emails ADD COLUMN IF NOT EXISTS open_from_proxy BOOLEAN NOT NULL DEFAULT FALSE`,
+
+  // =================================================================
+  // Phase 4.5: universal mailbox / reply sync.
+  // Every reader stores replies in the same shape regardless of provider.
+  // =================================================================
+
+  // Replies: extended for provider-agnostic thread reconstruction.
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS email_account_id       VARCHAR REFERENCES email_accounts(id) ON DELETE SET NULL`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS provider_message_id    VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS internet_message_id    VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS in_reply_to            VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS references_header      TEXT`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS thread_id              VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS folder                 VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS provider_kind          VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS category               VARCHAR`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS classification_summary TEXT`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS sentiment_confidence   REAL`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS body_html              TEXT`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS raw_headers            JSONB`,
+  `ALTER TABLE replies ADD COLUMN IF NOT EXISTS synced_at              TIMESTAMPTZ`,
+
+  // Idempotency: one row per (workspace, provider_message_id). Prevents
+  // double-inserting the same reply on repeated polls.
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_replies_provider_msg
+     ON replies (workspace_id, provider_message_id)
+     WHERE provider_message_id IS NOT NULL`,
+
+  // Fast thread lookup.
+  `CREATE INDEX IF NOT EXISTS idx_replies_thread ON replies (thread_id)
+     WHERE thread_id IS NOT NULL`,
+
+  // Sync state per account: last polled UID/history/timestamp so incremental
+  // polls only fetch new messages. One row per email_account.
+  `CREATE TABLE IF NOT EXISTS mailbox_sync_state (
+    id                  VARCHAR PRIMARY KEY,
+    account_id          VARCHAR NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
+    workspace_id        VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    last_sync_at        TIMESTAMPTZ,
+    last_uid            INTEGER,
+    last_history_id     VARCHAR,
+    last_delta_link     TEXT,
+    last_error          TEXT,
+    consecutive_errors  INTEGER NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_mailbox_sync_account ON mailbox_sync_state (account_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_mailbox_sync_workspace ON mailbox_sync_state (workspace_id)`,
 ];
 
 export async function runMigrations(): Promise<void> {

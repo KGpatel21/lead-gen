@@ -277,7 +277,27 @@ async function startFullStackServer(): Promise<void> {
 
   await import("./server/queues/emailSend.worker");
   await import("./server/queues/followUp.worker");
-  log.info("BullMQ workers registered (email-send, follow-up)");
+  await import("./server/queues/mailboxSync.worker");
+  log.info("BullMQ workers registered (email-send, follow-up, mailbox-sync)");
+
+  // Schedule a repeatable poll for every non-SES account so replies get
+  // synced without a user having to hit /sync-now.
+  try {
+    const { emailAccountRepository } = await import("./server/db/repositories");
+    const { scheduleAccountPoll } = await import("./server/queues/mailboxSyncQueue");
+    const accounts = await emailAccountRepository.list();
+    let scheduled = 0;
+    for (const a of accounts) {
+      if (a.provider === "ses" || !a.isActive || a.deletedAt) continue;
+      await scheduleAccountPoll(a.id, a.workspaceId).catch((e) =>
+        log.warn({ accountId: a.id, err: e?.message }, "scheduleAccountPoll failed")
+      );
+      scheduled++;
+    }
+    log.info({ scheduled }, "mailbox polls scheduled");
+  } catch (err: any) {
+    log.warn({ err: err.message }, "mailbox poll scheduling skipped");
+  }
 
   server.listen(config.port, "0.0.0.0", () => {
     log.info({ port: config.port, url: `http://localhost:${config.port}` }, "server listening");
@@ -320,6 +340,13 @@ async function gracefulShutdown(signal: string, timeoutMs = 30_000): Promise<voi
       log.info("bullmq follow-up worker drained");
     } catch (err: any) {
       log.warn({ err: err?.message }, "bullmq follow-up worker close error");
+    }
+    try {
+      const { mailboxSyncWorker } = await import("./server/queues/mailboxSync.worker");
+      await mailboxSyncWorker.close();
+      log.info("bullmq mailbox-sync worker drained");
+    } catch (err: any) {
+      log.warn({ err: err?.message }, "bullmq mailbox-sync worker close error");
     }
 
     // 3. Close BullMQ queues + shared redis + pg pool.

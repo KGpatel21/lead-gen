@@ -192,6 +192,43 @@ export class EmailAccountController {
     const account = await emailAccountRepository.findById(id, req.workspaceId);
     if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
     await emailAccountRepository.softDelete(id, req.workspaceId);
+    // Unschedule any pending mailbox-sync jobs.
+    try {
+      const { unscheduleAccountPoll } = await import("../queues/mailboxSyncQueue");
+      await unscheduleAccountPoll(id);
+    } catch { /* ignore */ }
     res.json({ success: true });
+  }
+
+  /**
+   * Rename the account (display name only; email stays immutable).
+   */
+  public static async rename(req: WorkspaceScopedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const { displayName } = req.body || {};
+    if (typeof displayName !== "string" || displayName.trim().length < 1 || displayName.length > 120) {
+      res.status(400).json({ success: false, error: "displayName (1-120 chars) required." });
+      return;
+    }
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
+    if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
+    const updated = await emailAccountRepository.update(id, { displayName: displayName.trim() }, req.workspaceId);
+    res.json({ success: true, account: sanitize(updated) });
+  }
+
+  /**
+   * Trigger an on-demand mailbox sync for this account (one-shot BullMQ job).
+   */
+  public static async syncNow(req: WorkspaceScopedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const account = await emailAccountRepository.findById(id, req.workspaceId);
+    if (!account) { res.status(404).json({ success: false, error: "not found" }); return; }
+    if (account.provider === "ses") {
+      res.status(400).json({ success: false, error: "SES has no inbox to sync." });
+      return;
+    }
+    const { triggerOneShotSync } = await import("../queues/mailboxSyncQueue");
+    const jobId = await triggerOneShotSync(id, req.workspaceId!);
+    res.json({ success: true, jobId, accountId: id });
   }
 }

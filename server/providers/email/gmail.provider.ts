@@ -120,7 +120,7 @@ export const gmailOAuth = {
 
 // ---------- Provider implementation ----------
 
-async function getFreshAccessToken(account: EmailAccount): Promise<string> {
+export async function getFreshGmailAccessToken(account: EmailAccount): Promise<string> {
   const expiryMs = account.oauthAccessTokenExpiresAt ? new Date(account.oauthAccessTokenExpiresAt).getTime() : 0;
   const now = Date.now();
   const stillValid = account.oauthAccessTokenEncrypted && expiryMs - now > 60_000;
@@ -171,7 +171,7 @@ export class GmailOAuthProvider implements EmailProvider {
   constructor(public readonly account: EmailAccount) {}
 
   public async send(payload: EmailPayload): Promise<SendResult> {
-    const accessToken = await getFreshAccessToken(this.account);
+    const accessToken = await getFreshGmailAccessToken(this.account);
     const fromAddress = this.account.displayName
       ? `"${this.account.displayName}" <${this.account.email}>`
       : this.account.email;
@@ -203,7 +203,7 @@ export class GmailOAuthProvider implements EmailProvider {
   public async test(): Promise<HealthTestResult> {
     const start = Date.now();
     try {
-      const accessToken = await getFreshAccessToken(this.account);
+      const accessToken = await getFreshGmailAccessToken(this.account);
       const resp = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });

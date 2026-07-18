@@ -119,7 +119,7 @@ export const outlookOAuth = {
   },
 };
 
-async function getFreshAccessToken(account: EmailAccount): Promise<string> {
+export async function getFreshOutlookAccessToken(account: EmailAccount): Promise<string> {
   const expiryMs = account.oauthAccessTokenExpiresAt ? new Date(account.oauthAccessTokenExpiresAt).getTime() : 0;
   const now = Date.now();
   if (account.oauthAccessTokenEncrypted && expiryMs - now > 60_000) {
@@ -147,7 +147,7 @@ export class OutlookOAuthProvider implements EmailProvider {
   constructor(public readonly account: EmailAccount) {}
 
   public async send(payload: EmailPayload): Promise<SendResult> {
-    const accessToken = await getFreshAccessToken(this.account);
+    const accessToken = await getFreshOutlookAccessToken(this.account);
 
     const internetMessageHeaders: Array<{ name: string; value: string }> = [];
     if (payload.trackingId) internetMessageHeaders.push({ name: "x-email-id", value: payload.trackingId });
@@ -196,7 +196,7 @@ export class OutlookOAuthProvider implements EmailProvider {
   public async test(): Promise<HealthTestResult> {
     const start = Date.now();
     try {
-      const accessToken = await getFreshAccessToken(this.account);
+      const accessToken = await getFreshOutlookAccessToken(this.account);
       const resp = await fetch(GRAPH_ME, { headers: { Authorization: `Bearer ${accessToken}` } });
       const latencyMs = Date.now() - start;
       if (!resp.ok) return { ok: false, message: `Graph /me HTTP ${resp.status}`, latencyMs };

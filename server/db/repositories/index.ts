@@ -30,6 +30,8 @@ export type { Email, EmailStatus, CreateEmailInput } from "./email.repository";
 
 // Phase 3 → Phase 4 unified email accounts
 export { workspaceRepository } from "./workspace.repository";
+export { mailboxSyncStateRepository } from "./mailboxSyncState.repository";
+export type { MailboxSyncStateRow } from "./mailboxSyncState.repository";
 export type { Workspace, WorkspaceMember } from "./workspace.repository";
 export { emailAccountRepository } from "./emailAccount.repository";
 export type {

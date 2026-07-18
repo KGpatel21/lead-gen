@@ -18,6 +18,7 @@ import {
 } from "../db/repositories";
 import { queueService } from "../services/queue.service";
 import { aiService, GeminiNotConfiguredError } from "../services/ai.service";
+import { replyClassifierService } from "../services/replyClassifier.service";
 import { logAudit } from "../services/db.service";
 import { CampaignStatus, ReplySentiment } from "../../src/types";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
@@ -158,6 +159,29 @@ export class SystemController {
     } catch (err) {
       if (err instanceof GeminiNotConfiguredError) {
         res.status(503).json({ success: false, error: err.message });
+        return;
+      }
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
+  }
+
+  /**
+   * Phase 4.5 preview endpoint: classify any reply text with the 9-way Groq
+   * classifier and return the result WITHOUT persisting. Useful for testing
+   * from the frontend or a smoke script.
+   */
+  public static async classifyReplyPreview(req: Request, res: Response): Promise<void> {
+    const { text, subject } = req.body || {};
+    if (typeof text !== "string" || text.trim().length === 0) {
+      res.status(400).json({ success: false, error: "text (string) required" });
+      return;
+    }
+    try {
+      const result = await replyClassifierService.classify(text, typeof subject === "string" ? subject : undefined);
+      res.json({ success: true, result });
+    } catch (err) {
+      if ((err as any)?.name === "AIProviderNotConfiguredError") {
+        res.status(503).json({ success: false, error: (err as Error).message });
         return;
       }
       res.status(500).json({ success: false, error: (err as Error).message });

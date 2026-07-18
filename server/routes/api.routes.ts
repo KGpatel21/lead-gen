@@ -13,6 +13,7 @@ import { BillingController } from "../controllers/billing.controller";
 import { SyncController } from "../controllers/sync.controller";
 import { LeadDiscoveryController } from "../controllers/leadDiscovery.controller";
 import { EmailAccountController } from "../controllers/emailAccount.controller";
+import { MonitoringController } from "../controllers/monitoring.controller";
 import { SenderPoolController } from "../controllers/senderPool.controller";
 import { OAuthController } from "../controllers/oauth.controller";
 import { SuppressionController } from "../controllers/suppression.controller";
@@ -140,6 +141,7 @@ router.get("/replies", authenticateJwt, SystemController.getReplies);
 router.put("/replies/:id/read", authenticateJwt, SystemController.readReply);
 router.post("/replies/:id/send", authenticateJwt, SystemController.sendReplyMessage);
 router.post("/replies/:id/ai-reply", authenticateJwt, SystemController.generateAiReply);
+router.post("/replies/classify-preview", authenticateJwt, SystemController.classifyReplyPreview);
 
 // Autonomous Agents
 router.get("/agents", authenticateJwt, SystemController.getAgents);
@@ -178,7 +180,12 @@ router.put("/email-accounts/:id", authenticateJwt, EmailAccountController.update
 router.post("/email-accounts/:id/test", authenticateJwt, EmailAccountController.test);
 router.post("/email-accounts/:id/active", authenticateJwt, EmailAccountController.setActive);
 router.post("/email-accounts/:id/reconnect", authenticateJwt, EmailAccountController.reconnect);
+router.patch("/email-accounts/:id/rename", authenticateJwt, EmailAccountController.rename);
+router.post("/email-accounts/:id/sync-now", authenticateJwt, EmailAccountController.syncNow);
 router.delete("/email-accounts/:id", authenticateJwt, EmailAccountController.delete);
+
+// --- PROVIDER MONITORING (Phase 4.5) ---
+router.get("/monitoring/providers", authenticateJwt, MonitoringController.dashboard);
 
 // Backward-compatible alias for Phase 3 clients: sender-identities is a subset
 // of email-accounts. Both paths route to the same controller.
