@@ -199,6 +199,7 @@ observed via Prometheus-format `/metrics`.
 | Database         | PostgreSQL 15+ (native `pg` driver, `pg.Pool`)     |
 | Cache & queue    | Redis (ioredis)                                    |
 | Email provider   | Pluggable via `EmailProvider` interface. Supports Amazon SES, generic SMTP (Zoho, Titan, GoDaddy, Fastmail, Hostinger, Namecheap, cPanel, Gmail SMTP, Outlook SMTP, Yahoo, Proton Bridge, …), Gmail OAuth, Outlook OAuth. Add new providers under `server/providers/email/`. |
+| Mailbox reader   | Pluggable via `MailboxReader` interface. `ImapReader` for SMTP-linked accounts (imapflow + mailparser), `GmailReader` via Gmail REST + history API, `OutlookReader` via Microsoft Graph delta. Reply-sync BullMQ worker polls every 5 minutes; Groq classifies each new reply into 9 buckets — Interested / Meeting Requested / Need More Information / Price Objection / Not Interested / Out of Office / Auto Reply / Spam Complaint / Bounce — with a summary and confidence. |
 | AI provider      | Pluggable via `AIProvider` interface. Default: Groq `llama-3.3-70b-versatile`. Fallback: Gemini. Add new providers under `server/ai/providers/`. |
 | Billing          | Stripe                                             |
 | Realtime         | `ws` WebSocket server (path `/ws`)                 |
