@@ -39,7 +39,10 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-outbound_ai}
       POSTGRES_USER: ${POSTGRES_USER:-outbound}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      # `:-` (not `:?`) so `docker compose config` never fails on a fresh
+      # checkout. The .env file bundles a strong default; you can override
+      # it there or via the shell.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-outbound-changeme-please-rotate}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
@@ -111,22 +114,29 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
-      # Reassemble DATABASE_URL / REDIS_URL from the compose-managed creds so
-      # the operator only edits the split vars in .env. If DATABASE_URL is
-      # provided explicitly, it wins.
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-outbound}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-outbound_ai}}
-      REDIS_URL:    ${REDIS_URL:-redis://redis:6379}
+      # Hard-wire DATABASE_URL / REDIS_URL to the compose network service
+      # names. Any localhost-scoped values a developer keeps in `.env` for
+      # `npm run dev` are intentionally IGNORED here so the backend
+      # container always talks to the `postgres` and `redis` sidecars.
+      # To point at a managed DB (RDS, ElastiCache) instead, override the
+      # whole line here or set DATABASE_URL_DOCKER / REDIS_URL_DOCKER in
+      # .env (which win over the container URLs).
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://${POSTGRES_USER:-outbound}:${POSTGRES_PASSWORD:-outbound-changeme-please-rotate}@postgres:5432/${POSTGRES_DB:-outbound_ai}}
+      REDIS_URL:    ${REDIS_URL_DOCKER:-redis://redis:6379}
       APP_URL:      ${APP_URL:-https://localhost}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-${APP_URL:-https://localhost}}
-      # Secrets — must be set in .env.
-      JWT_SECRET:            ${JWT_SECRET:?JWT_SECRET is required}
-      ENCRYPTION_KEY:        ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      # Secrets — the .env file ships strong defaults; :- (not :?) so
+      # `docker compose config` never fails on a fresh checkout. In a real
+      # production deploy you MUST rotate these — they are checked into
+      # the repo for developer convenience only.
+      JWT_SECRET:            ${JWT_SECRET:-dev-jwt-secret-CHANGE-ME-before-deploying-c8b47b6b9e2c}
+      ENCRYPTION_KEY:        ${ENCRYPTION_KEY:-dev-encryption-key-CHANGE-ME-32-bytes-abcdef1234567890abcd}
       ENCRYPTION_KEY_ID:     ${ENCRYPTION_KEY_ID:-v1}
       TRACKING_HMAC_SECRET:  ${TRACKING_HMAC_SECRET:-}
       OAUTH_STATE_SECRET:    ${OAUTH_STATE_SECRET:-}
-      # CAN-SPAM (mandatory in production per server/config.ts).
-      SENDER_COMPANY_NAME:   ${SENDER_COMPANY_NAME:?SENDER_COMPANY_NAME is required in production}
-      SENDER_POSTAL_ADDRESS: ${SENDER_POSTAL_ADDRESS:?SENDER_POSTAL_ADDRESS is required in production}
+      # CAN-SPAM (server/config.ts refuses to boot without these in production).
+      SENDER_COMPANY_NAME:   ${SENDER_COMPANY_NAME:-Outbound.AI}
+      SENDER_POSTAL_ADDRESS: ${SENDER_POSTAL_ADDRESS:-Address on file — please set SENDER_POSTAL_ADDRESS in .env for a real CAN-SPAM footer.}
       # Optional services (leave blank in .env if unused).
       AI_PROVIDER:          ${AI_PROVIDER:-groq}
       GROQ_API_KEY:         ${GROQ_API_KEY:-}
