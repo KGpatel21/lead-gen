@@ -1,0 +1,139 @@
+# =============================================================================
+# CI/CD — deploy on push to main.
+#
+# Pipeline:
+#   1. lint    — typecheck the whole repo (`tsc --noEmit`).
+#   2. build   — validate the Docker images actually build.
+#                (buildx layer cache accelerates subsequent runs.)
+#   3. deploy  — SSH to EC2, pull, rebuild, healthcheck, prune.
+#
+# Required GitHub secrets (Settings → Secrets → Actions):
+#   EC2_HOST            — public DNS or IP.
+#   EC2_USER            — SSH user (usually `ubuntu` or `ec2-user`).
+#   EC2_SSH_KEY         — the PRIVATE key matching the EC2 key pair.
+#   EC2_DEPLOY_ROOT     — path to the repo on the host (default: /opt/outbound-ai).
+#   EC2_KNOWN_HOSTS     — output of `ssh-keyscan -H $EC2_HOST` (prevents MITM).
+# =============================================================================
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --prefer-offline
+      - name: TypeScript check
+        run: npm run lint
+
+  build:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: outbound-ai-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - name: Build frontend image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: false
+          tags: outbound-ai-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - name: Verify docker compose config
+        run: |
+          # These envs must exist for `docker compose config` to succeed.
+          # The real values on the host stay in the host's .env.
+          export POSTGRES_PASSWORD=ci-placeholder
+          export JWT_SECRET=$(head -c 48 /dev/urandom | base64)
+          export ENCRYPTION_KEY=$(head -c 48 /dev/urandom | base64)
+          export SENDER_COMPANY_NAME="CI Preview"
+          export SENDER_POSTAL_ADDRESS="1 CI Way, Test City, TS 00000"
+          docker compose config >/dev/null
+
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+    needs: [lint, build]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+    steps:
+      - name: Trust the host key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Configure SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy over SSH
+        env:
+          EC2_HOST:        ${{ secrets.EC2_HOST }}
+          EC2_USER:        ${{ secrets.EC2_USER }}
+          EC2_DEPLOY_ROOT: ${{ secrets.EC2_DEPLOY_ROOT }}
+        run: |
+          DEPLOY_ROOT="${EC2_DEPLOY_ROOT:-/opt/outbound-ai}"
+          ssh -o StrictHostKeyChecking=yes -i ~/.ssh/deploy_key \
+              "$EC2_USER@$EC2_HOST" \
+              "DEPLOY_ROOT='$DEPLOY_ROOT' bash -s" <<'REMOTE'
+              set -euo pipefail
+              cd "$DEPLOY_ROOT"
+              echo "[remote] running update.sh…"
+              ./scripts/update.sh
+              echo "[remote] pruning dangling images…"
+              docker image prune -f >/dev/null || true
+              docker builder prune -f >/dev/null || true
+              echo "[remote] deploy complete."
+          REMOTE
+
+      - name: Post-deploy health probe
+        env:
+          APP_URL: ${{ secrets.PROD_APP_URL }}
+        run: |
+          if [ -z "${APP_URL:-}" ]; then
+            echo "PROD_APP_URL not set — skipping remote health probe."
+            exit 0
+          fi
+          echo "Probing $APP_URL/health"
+          for i in $(seq 1 20); do
+            if curl --fail --silent --show-error --max-time 5 "$APP_URL/health" >/dev/null; then
+              echo "Healthy."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Backend did not respond healthy after 60s." >&2
+          exit 1
+
+      - name: Cleanup keys
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

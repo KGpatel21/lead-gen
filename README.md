@@ -379,22 +379,176 @@ Then open:
 
 ## Production Deployment
 
+The full stack ships with production-grade Docker infrastructure:
+
+- **`Dockerfile`** — multi-stage backend image (Node 20 Alpine, non-root,
+  container HEALTHCHECK against `/health`).
+- **`Dockerfile.frontend`** — multi-stage frontend image (Vite build →
+  Nginx 1.27 Alpine serving the SPA with proper client-side routing).
+- **`docker-compose.yml`** — five services (postgres, redis, backend,
+  frontend, nginx reverse proxy) plus an opt-in `certbot` profile.
+- **`nginx/nginx.conf`** + **`nginx/shared_locations.conf`** — reverse
+  proxy with HTTPS-ready TLS block, gzip, aggressive asset caching,
+  WebSocket upgrades on `/ws`, rate-limiting for `/api/auth`, and ACME
+  HTTP-01 challenge path reserved for cert renewals.
+- **`.github/workflows/deploy.yml`** — every push to `main` runs
+  typecheck + image build validation, then SSHes into the EC2 host and
+  triggers `scripts/update.sh`.
+- **`scripts/`** — `deploy.sh` (first-time), `update.sh` (rolling
+  redeploy), `backup-db.sh` (nightly), `restore-db.sh`, `issue-cert.sh`.
+
+### 1. Local smoke — `docker compose up`
+
 ```bash
-npm run build      # bundles React → dist/, esbuild server → dist/server.cjs
-npm run start      # NODE_ENV=production node dist/server.cjs
+# On any host with Docker + the compose plugin.
+cp .env.example .env      # fill in POSTGRES_PASSWORD, JWT_SECRET, ENCRYPTION_KEY,
+                          # SENDER_COMPANY_NAME, SENDER_POSTAL_ADDRESS
+docker compose config     # sanity-check the merged YAML (must exit 0)
+docker compose up -d --build
+docker compose ps         # every service should reach `healthy` within ~60s
 ```
 
-Requirements in production:
+The stack is reachable at `http://localhost` after boot.
 
-- `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `ENCRYPTION_KEY` — all set,
-  all high-entropy.
-- Reverse proxy (nginx / Cloud Run / ALB) terminating TLS.
-- Postgres backups configured.
-- (Recommended) rotate `ENCRYPTION_KEY` **only** with a re-encryption
-  migration for `smtp_accounts.smtp_password`; otherwise stored SMTP
-  passwords become unreadable.
+### 2. First-time production deploy on EC2
 
-**Docker / Compose files ship in Phase 3.**
+```bash
+# One-time host prep.
+sudo apt-get update && sudo apt-get install -y docker.io docker-compose-plugin git
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Clone + configure.
+sudo mkdir -p /opt/outbound-ai && sudo chown $USER: /opt/outbound-ai
+git clone https://github.com/KGpatel21/lead-gen.git /opt/outbound-ai
+cd /opt/outbound-ai
+cp .env.example .env && $EDITOR .env   # fill in the required secrets
+
+# Boot.
+./scripts/deploy.sh
+```
+
+`scripts/deploy.sh` validates the compose config, pulls base images,
+builds backend + frontend, brings the stack up, and waits for the
+backend to report `healthy`.
+
+### 3. TLS via Let's Encrypt
+
+```bash
+# Point DNS for $NGINX_SERVER_NAME at this host, then:
+./scripts/issue-cert.sh
+```
+
+This runs `docker compose --profile tls run --rm certbot`, which uses
+the HTTP-01 challenge path already reserved at
+`/.well-known/acme-challenge/`. Certs land on the `outbound_certbot_certs`
+volume and Nginx picks them up on reload.
+
+After the first issuance, flip `nginx/nginx.conf` from bootstrap mode
+(HTTP-only) to forced HTTPS by uncommenting the `return 301 https://…`
+line in the `listen 80` server block, then `docker compose up -d nginx`.
+
+Add renewal to cron on the host:
+
+```cron
+0 4 * * *  cd /opt/outbound-ai && docker compose --profile tls run --rm certbot renew --quiet && docker compose exec -T nginx nginx -s reload
+```
+
+### 4. Continuous deploy — GitHub Actions
+
+Configure these repository secrets (Settings → Secrets and variables →
+Actions):
+
+| Secret | Purpose |
+|---|---|
+| `EC2_HOST` | Public DNS / IP of the production host. |
+| `EC2_USER` | SSH user (usually `ubuntu` or `ec2-user`). |
+| `EC2_SSH_KEY` | Private half of the key pair authorized on the host. |
+| `EC2_KNOWN_HOSTS` | Output of `ssh-keyscan -H $EC2_HOST`. |
+| `EC2_DEPLOY_ROOT` | Absolute path to the checkout (default `/opt/outbound-ai`). |
+| `PROD_APP_URL` | (Optional) URL for the post-deploy health probe. |
+
+On every push to `main` the workflow:
+
+1. Typechecks (`npm run lint`).
+2. Validates that both Dockerfiles build against a warm buildx cache and
+   that `docker compose config` succeeds with placeholder secrets.
+3. SSHes to `$EC2_HOST`, runs `scripts/update.sh` (git pull → rebuild →
+   rolling restart → wait for `healthy` → prune dangling images).
+4. Optionally hits `$PROD_APP_URL/health` to confirm the deploy took.
+
+### 5. Backup + restore
+
+```bash
+# Nightly backup (add to /etc/cron.d).
+0 3 * * *  /opt/outbound-ai/scripts/backup-db.sh >>/var/log/outbound-backup.log 2>&1
+```
+
+`backup-db.sh` runs `pg_dump --clean --if-exists --no-owner --no-acl`
+inside the postgres container, gzips the result to `$BACKUP_DIR`
+(default `/var/backups/outbound`), rotates to the last 14 files, and —
+if `BACKUP_S3_BUCKET` is set — uploads the archive with `aws s3 cp`.
+
+Restore is guarded (requires typing the DB name to confirm):
+
+```bash
+sudo ./scripts/restore-db.sh /var/backups/outbound/outbound-outbound_ai-20260119-030001.sql.gz
+```
+
+### 6. Required environment (production `.env`)
+
+```dotenv
+# --- Required for every environment (config.ts refuses to boot without these) ---
+POSTGRES_DB=outbound_ai
+POSTGRES_USER=outbound
+POSTGRES_PASSWORD=<generate: openssl rand -base64 32>
+JWT_SECRET=<generate: openssl rand -base64 48>
+ENCRYPTION_KEY=<generate: openssl rand -base64 48>
+
+# --- Required for CAN-SPAM (physical postal address on every email) ---
+SENDER_COMPANY_NAME="Your Company, Inc."
+SENDER_POSTAL_ADDRESS="500 Somewhere St, City, ST 00000, US"
+
+# --- Reverse proxy ---
+NGINX_SERVER_NAME=outbound.your-domain.com
+CERTBOT_EMAIL=devops@your-domain.com
+
+# --- App URL used in tracking pixels + unsubscribe links ---
+APP_URL=https://outbound.your-domain.com
+PUBLIC_BASE_URL=https://outbound.your-domain.com
+
+# … (see .env.example for the full catalog of optional integrations)
+```
+
+`server/config.ts` performs fail-fast validation on boot — a missing or
+under-length secret aborts startup with a clear error message.
+
+### 7. Verifying the deployment
+
+```bash
+# Health of every internal service.
+curl -f https://outbound.your-domain.com/health
+
+# BullMQ workers (email-send, follow-up, mailbox-sync, sequence-tick,
+# sequence-advance) — all "UP" for a healthy stack.
+curl -f https://outbound.your-domain.com/health/workers
+
+# Prometheus scrape endpoint.
+curl -f https://outbound.your-domain.com/metrics
+```
+
+### Restart & failure semantics
+
+- Every service has `restart: unless-stopped`. Backend and nginx also
+  carry a Docker healthcheck; if `/health` fails four times in a row the
+  container is marked unhealthy and Docker will attempt restart.
+- `backend` uses `depends_on: {postgres: service_healthy, redis: service_healthy}` —
+  it will not even attempt to boot until Postgres and Redis pass
+  `pg_isready` / `redis-cli ping`.
+- Logs use the JSON driver with 20 MB × 5 file rotation per container,
+  attached to the `service` label so `docker logs` and log-forwarders
+  (Filebeat, Fluent Bit, Vector, CloudWatch) can slice cleanly.
 
 ---
 
