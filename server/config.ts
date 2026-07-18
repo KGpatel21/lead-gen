@@ -25,6 +25,9 @@ interface AppConfig {
   jwtSecret: string;
   encryptionKey: string;
 
+  aiProvider: "groq" | "gemini";
+  groqApiKey: string | null;
+  groqModel: string;
   geminiApiKey: string | null;
 
   stripeSecretKey: string | null;
@@ -80,6 +83,15 @@ export const config: AppConfig = {
   jwtSecret: required("JWT_SECRET"),
   encryptionKey: required("ENCRYPTION_KEY"),
 
+  aiProvider: (() => {
+    const raw = (process.env.AI_PROVIDER || "groq").toLowerCase().trim();
+    if (raw !== "groq" && raw !== "gemini") {
+      throw new Error(`[config] AI_PROVIDER must be one of: groq, gemini. Got "${raw}".`);
+    }
+    return raw as "groq" | "gemini";
+  })(),
+  groqApiKey: optional("GROQ_API_KEY"),
+  groqModel: process.env.GROQ_MODEL?.trim() || "llama-3.3-70b-versatile",
   geminiApiKey: optional("GEMINI_API_KEY"),
 
   stripeSecretKey: optional("STRIPE_SECRET_KEY"),

@@ -123,7 +123,11 @@ app.get("/health", async (_req: Request, res: Response) => {
   const smtps = await smtpRepository.list().catch(() => []);
   services.smtp = smtps.length > 0 ? `PROVISIONED (${smtps.length})` : "NO_SMTP_ACCOUNTS";
 
-  services.gemini_ai = config.geminiApiKey ? "CONFIGURED" : "NOT_CONFIGURED";
+  {
+    const { getAIProvider } = await import("./server/ai/factory");
+    const p = getAIProvider();
+    services.ai_provider = `${p.name}:${p.model} (${p.isConfigured() ? "CONFIGURED" : "NOT_CONFIGURED"})`;
+  }
   services.stripe   = config.stripeSecretKey ? "CONFIGURED" : "NOT_CONFIGURED";
 
   services.queue_worker = `ACTIVE (last sweep: ${queueWorker.lastSweepTime})`;

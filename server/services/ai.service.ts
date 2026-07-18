@@ -2,16 +2,16 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Gemini-backed AI operations for lead enrichment, sequence generation,
- * reply sentiment triage, and freeform agent runs.
+ * AI operations facade.
  *
- * If GEMINI_API_KEY is unset, every method throws GeminiNotConfiguredError.
- * Callers should return HTTP 503 to the client. There is NO simulated
- * enrichment fallback anymore — fake data was worse than an error.
+ * Every call routes through the pluggable provider abstraction in
+ * `server/ai/`. Prompts and JSON schemas here are byte-identical to
+ * the previous Gemini implementation — only the transport changed.
+ *
+ * To swap providers: set `AI_PROVIDER` in `.env`. Options: groq | gemini.
  */
 
-import { GoogleGenAI } from "@google/genai";
-import { config } from "../config";
+import { getAIProvider, AIProviderNotConfiguredError } from "../ai";
 import {
   agentRepository,
   leadRepository,
@@ -23,30 +23,18 @@ import {
 } from "../db/repositories";
 import { Lead, ReplySentiment } from "../../src/types";
 
-export class GeminiNotConfiguredError extends Error {
-  public readonly httpStatus = 503;
-  constructor() {
-    super("Gemini AI is not configured. Set GEMINI_API_KEY in .env to enable AI features.");
-    this.name = "GeminiNotConfiguredError";
-  }
-}
-
-const MODEL = "gemini-flash-lite-latest";
+// Preserve the old export name so existing controllers keep compiling.
+// `GeminiNotConfiguredError` is now an alias for the vendor-neutral class.
+export { AIProviderNotConfiguredError as GeminiNotConfiguredError } from "../ai";
+export { AIProviderError } from "../ai";
 
 class AiService {
-  private client: GoogleGenAI | null = null;
-
-  private require(): GoogleGenAI {
-    if (!config.geminiApiKey) throw new GeminiNotConfiguredError();
-    if (!this.client) this.client = new GoogleGenAI({ apiKey: config.geminiApiKey });
-    return this.client;
-  }
-
   public isConfigured(): boolean {
-    return !!config.geminiApiKey;
+    return getAIProvider().isConfigured();
   }
 
   private static parseJsonResponse<T>(rawText: string): T {
+    // Providers may still return code fences even when asked for JSON.
     const clean = rawText.trim().replace(/^```json/i, "").replace(/```$/, "").trim();
     return JSON.parse(clean) as T;
   }
@@ -56,7 +44,10 @@ class AiService {
    * Uses Google Search grounding when available.
    */
   public async enrichAndResearchLead(leadId: string): Promise<Lead | null> {
-    const ai = this.require();
+    const provider = getAIProvider();
+    if (!provider.isConfigured()) {
+      throw new AIProviderNotConfiguredError(provider.name, `${provider.name.toUpperCase()}_API_KEY`);
+    }
     const lead = await leadRepository.findById(leadId);
     if (!lead) return null;
     const campaign = lead.campaignId ? await campaignRepository.findById(lead.campaignId) : null;
@@ -107,18 +98,13 @@ Return ONLY a raw JSON object matching this schema exactly:
 Do not include markdown code fences.
 `;
 
-    // Reasoning-only: no Google Search grounding. Grounding drove the
-    // 429 quota exhaustion, and enrichment is now sourced from Firecrawl
-    // + Google Places via businessProfileRepository (see generateEmailForBusiness).
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-      },
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "json",
+      metadata: { operation: "enrichLead", leadId, company: lead.company },
     });
 
-    const parsed = AiService.parseJsonResponse<any>(response.text || "");
+    const parsed = AiService.parseJsonResponse<any>(result.text || "");
     const enriched = await leadRepository.setEnrichment(leadId, {
       website: parsed.website,
       businessDescription: parsed.businessDescription,
@@ -151,8 +137,8 @@ Do not include markdown code fences.
   /**
    * Produce a personalized initial email for a lead. Uses cached lead.aiEmails
    * when present, otherwise falls back to template substitution against the
-   * campaign's subject/body templates. This method does NOT call Gemini —
-   * it composes from data that Gemini already produced (or from your template).
+   * campaign's subject/body templates. This method does NOT call the AI —
+   * it composes from data the AI already produced (or from your template).
    */
   public async composeInitialEmail(
     leadId: string,
@@ -185,7 +171,7 @@ Do not include markdown code fences.
   public async classifySentimentAndDraftReply(
     replyText: string
   ): Promise<{ sentiment: ReplySentiment; aiReplyDraft: string; actionPlan: string }> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const prompt = `
 Classify this cold-outreach reply and draft a response.
 
@@ -199,16 +185,16 @@ Return ONLY raw JSON:
   "actionPlan": "string (one sentence)"
 }
 `;
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: { responseMimeType: "application/json" },
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "json",
+      metadata: { operation: "classifyReply" },
     });
     const parsed = AiService.parseJsonResponse<{
       sentiment: string;
       aiReplyDraft: string;
       actionPlan: string;
-    }>(response.text || "");
+    }>(result.text || "");
 
     const sentimentMap: Record<string, ReplySentiment> = {
       "Interested": ReplySentiment.INTERESTED,
@@ -227,7 +213,7 @@ Return ONLY raw JSON:
     topic: string,
     valueProp: string
   ): Promise<{ subject: string; body: string; spamScore: number; tone: string }> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const prompt = `
 Generate a high-converting 1-step cold-email pitch.
 Niche/topic: ${topic}
@@ -238,16 +224,16 @@ calculate spam score 0.1-10.0.
 
 Return ONLY raw JSON: { "subject": "string", "body": "string", "spamScore": number, "tone": "string" }
 `;
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: { responseMimeType: "application/json" },
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "json",
+      metadata: { operation: "generateCampaignPitch", topic },
     });
-    return AiService.parseJsonResponse(response.text || "");
+    return AiService.parseJsonResponse(result.text || "");
   }
 
   public async personalizeLine(lead: Lead, styleGuide: string): Promise<string> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const prompt = `
 Draft a single, natural first line for a cold email.
 Lead: ${lead.firstName} ${lead.lastName} — ${lead.company}
@@ -256,22 +242,28 @@ Style: ${styleGuide || "Reference a specific achievement or industry angle."}
 Rules: 1 sentence, ≤18 words, no "hope this finds you well", no "congrats on the success".
 
 Return ONLY the sentence.`;
-    const response = await ai.models.generateContent({ model: MODEL, contents: prompt });
-    return (response.text || "").replace(/["]/g, "").trim();
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "text",
+      metadata: { operation: "personalizeLine", leadId: lead.id },
+    });
+    return (result.text || "").replace(/["]/g, "").trim();
   }
 
   public async runAgent(agentId: string, input: string): Promise<string> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const agent = await agentRepository.findById(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     await agentRepository.setStatus(agentId, "ACTIVE");
     await agentRepository.incrementTaskCount(agentId);
     try {
-      const response = await ai.models.generateContent({
-        model: agent.model || MODEL,
-        contents: `System Prompt: ${agent.systemPrompt}\n\nUser: ${input}`,
+      const result = await provider.generate({
+        prompt: input,
+        systemPrompt: agent.systemPrompt,
+        responseFormat: "text",
+        metadata: { operation: "runAgent", agentId, agentName: agent.name },
       });
-      const output = response.text || "";
+      const output = result.text || "";
       await agentRepository.logRun({ agentId, input, output, status: "SUCCESS" });
       return output;
     } catch (err: any) {
@@ -288,9 +280,9 @@ Return ONLY the sentence.`;
   }
 
   /**
-   * Autopilot: use Gemini + Google Search grounding to compile a lead list for
-   * a topic and platform, then create a campaign with those leads.
-   * Returns { campaignId, leads } — controller wires them into repositories.
+   * Autopilot: compile a lead list for a topic + platform.
+   * Grounding removed permanently — Places API is the source-of-truth for
+   * real businesses in the primary pipeline.
    */
   public async autopilotProspect(input: {
     topic: string;
@@ -311,7 +303,7 @@ Return ONLY the sentence.`;
       proposedService: string;
     }>;
   }> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const prompt = `
 You are the Boss Agent of a sales execution system. Find EXACTLY ${input.count}
 verified prospect leads for the topic "${input.topic}" strictly on ${input.platform}.
@@ -325,21 +317,17 @@ email, phone, platform, profileUrl, personalizedLine, descriptionMeta, proposedS
 Return ONLY raw JSON:
 { "strategy": "string", "prospects": [ { "firstName":"...", "lastName":"...", "company":"...", "email":"...", "phone":"...", "platform":"...", "profileUrl":"...", "personalizedLine":"...", "descriptionMeta":"...", "proposedService":"..." } ] }
 `;
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      // Grounding permanently removed from autopilot — Places API is now
-      // the source-of-truth for real businesses.
-      config: { responseMimeType: "application/json" },
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "json",
+      metadata: { operation: "autopilotProspect", topic: input.topic, platform: input.platform, count: input.count },
     });
-    return AiService.parseJsonResponse(response.text || "");
+    return AiService.parseJsonResponse(result.text || "");
   }
 
   // ------------------------------------------------------------------
   // Lead-discovery pipeline: reasoning-only email generation from
-  // extracted Places + Firecrawl data. This is the primary path going
-  // forward; `enrichAndResearchLead` above is kept for backward compat
-  // with the older campaign-lead flow.
+  // extracted Places + Firecrawl data.
   // ------------------------------------------------------------------
 
   public async generateEmailForBusiness(input: {
@@ -360,7 +348,7 @@ Return ONLY raw JSON:
     confidenceScore: number;
     emailTone: string;
   }> {
-    const ai = this.require();
+    const provider = getAIProvider();
     const business = await businessRepository.findById(input.businessId);
     if (!business) throw new Error(`Business ${input.businessId} not found`);
     const profile = await businessProfileRepository.findByBusinessId(business.id);
@@ -412,10 +400,15 @@ Return ONLY raw JSON matching:
 No markdown code fences.
 `;
 
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: { responseMimeType: "application/json" },
+    const result = await provider.generate({
+      prompt,
+      responseFormat: "json",
+      metadata: {
+        operation: "generateEmailForBusiness",
+        businessId: input.businessId,
+        businessName: business.name,
+        factsCount,
+      },
     });
 
     const parsed = AiService.parseJsonResponse<{
@@ -428,7 +421,7 @@ No markdown code fences.
       cta: string;
       confidenceScore: number;
       emailTone: string;
-    }>(response.text || "");
+    }>(result.text || "");
 
     await agentRepository.logRun({
       agentId: "agent-copywriter",

@@ -199,7 +199,7 @@ observed via Prometheus-format `/metrics`.
 | Database         | PostgreSQL 15+ (native `pg` driver, `pg.Pool`)     |
 | Cache & queue    | Redis (ioredis)                                    |
 | Email dispatch   | Nodemailer                                         |
-| AI               | Google Gemini via `@google/genai` SDK              |
+| AI provider      | Pluggable via `AIProvider` interface. Default: Groq `llama-3.3-70b-versatile`. Fallback: Gemini. Add new providers under `server/ai/providers/`. |
 | Billing          | Stripe                                             |
 | Realtime         | `ws` WebSocket server (path `/ws`)                 |
 | Auth             | HMAC-SHA256 signed JWT (`SecurityService`)         |
@@ -245,7 +245,9 @@ server refuses to start if a required variable is missing.
 | `REDIS_URL`                  | **yes**             | Redis connection string                             |
 | `JWT_SECRET`                 | **yes** (≥ 24 chars) | HMAC key for JWT                                    |
 | `ENCRYPTION_KEY`             | **yes** (≥ 24 chars) | Seed for AES-256 SMTP-password encryption           |
-| `GEMINI_API_KEY`             | AI features         | Reasoning-only email generation (no web-search)     |
+| `AI_PROVIDER`                | AI provider select  | `groq` (default) or `gemini`                        |
+| `GROQ_API_KEY`               | AI features (Groq)  | Primary provider; model fixed to `llama-3.3-70b-versatile` |
+| `GEMINI_API_KEY`             | AI features (Gemini) | Alternate provider, deprecated but functional      |
 | `GOOGLE_PLACES_API_KEY`      | Lead Discovery      | Real business search via Places API (New)           |
 | `FIRECRAWL_API_KEY`          | Lead Discovery      | Website scraping / structured extraction            |
 | `AWS_ACCESS_KEY_ID`          | SES delivery        | Amazon SES v2 credentials                           |
