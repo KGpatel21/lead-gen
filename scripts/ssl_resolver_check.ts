@@ -22,7 +22,32 @@ for (const [url, label] of cases) {
   console.log(`  ${state}  ${label.padEnd(38)}  ← ${r.reason}`);
 }
 
-console.log("\n  Override: DATABASE_SSL=true forces SSL even for localhost");
+// -------- The critical EC2 regression cases --------
+// The bug was: PGSSLMODE=require inherited from EC2 shell was making the
+// resolver force SSL even for the container Postgres. The new precedence
+// makes private-host classification authoritative.
+console.log("\n  --- EC2 regression cases (private host wins over env) ---");
+process.env.PGSSLMODE = "require";
+{
+  const r = resolveSslConfig("postgresql://outbound:pw@postgres:5432/outbound_ai");
+  console.log(`  ${r.ssl === false ? "OFF" : "ON "}  Docker Compose + PGSSLMODE=require   ← ${r.reason}`);
+}
 process.env.DATABASE_SSL = "true";
-const r = resolveSslConfig("postgresql://postgres:root@localhost:5432/outbound_ai");
-console.log(`  ${r.ssl === false ? "OFF" : "ON "}  localhost + DATABASE_SSL=true       ← ${r.reason}`);
+{
+  const r = resolveSslConfig("postgresql://postgres:root@localhost:5432/outbound_ai");
+  console.log(`  ${r.ssl === false ? "OFF" : "ON "}  localhost + DATABASE_SSL=true        ← ${r.reason}`);
+}
+
+// Opt-back-in: URL sslmode=require lets you FORCE SSL even to a private host.
+{
+  const r = resolveSslConfig("postgresql://user:pw@postgres:5432/prod?sslmode=require");
+  console.log(`  ${r.ssl === false ? "OFF" : "ON "}  private + URL sslmode=require        ← ${r.reason}`);
+}
+
+// Explicit off still wins over cloud.
+delete process.env.PGSSLMODE;
+delete process.env.DATABASE_SSL;
+{
+  const r = resolveSslConfig("postgresql://user:pw@prod-1.rds.amazonaws.com:5432/prod?sslmode=disable");
+  console.log(`  ${r.ssl === false ? "OFF" : "ON "}  RDS + sslmode=disable                ← ${r.reason}`);
+}

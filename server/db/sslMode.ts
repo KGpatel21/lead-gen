@@ -11,35 +11,44 @@
  * would open TLS, the container Postgres would reply "the server does
  * not support SSL connections", and boot would fail.
  *
- * The rules encoded here (highest-precedence first):
+ * Precedence rules (highest wins). This ORDER matters — it deliberately
+ * puts hostname classification ABOVE environment overrides so a
+ * PGSSLMODE=require inherited from the shell, an EC2 user-data script,
+ * or a systemd unit CANNOT force TLS against a `postgres:5432` service
+ * that fundamentally can't negotiate it:
  *
- *   1. Explicit env var wins.
- *        DATABASE_SSL=true|1|require  → force SSL (rejectUnauthorized=false).
- *        DATABASE_SSL=false|0|disable → force plain TCP.
- *        (Also honors the standard `PGSSLMODE`.)
+ *   1. Explicit *disable* wins unconditionally.
+ *        DATABASE_SSL=false|disable|off|0|no          → plain TCP.
+ *        sslmode=disable in the URL                    → plain TCP.
  *
- *   2. `sslmode=` query param on the URL wins next.
- *        sslmode=disable                                 → plain TCP.
- *        sslmode=require|verify-ca|verify-full|prefer    → SSL.
+ *   2. Private / in-cluster hostname → plain TCP.
+ *        localhost, 127.0.0.1, ::1, RFC1918 blocks,
+ *        Docker service aliases (postgres, postgresql, pg, db,
+ *          database, postgres-<anything>),
+ *        `.local`, `.internal`, `.lan`,
+ *        `.svc(.cluster.local)` (Kubernetes DNS).
+ *      EXCEPTION: if the URL itself explicitly says
+ *        sslmode=require|verify-ca|verify-full, we honor it so operators
+ *        running a private TLS-terminated Postgres can opt in.
  *
- *   3. Hostname pattern.
- *        Private / in-cluster hostnames  (localhost, 127.0.0.1, RFC1918
- *        blocks, Docker/K8s service names, `.local`, `.internal`,
- *        `.svc.cluster.local`)                            → plain TCP.
- *        Known managed-Postgres suffixes (AWS RDS, Neon, Railway,
- *        Supabase, Render, Azure, Aiven, Digital Ocean, Timescale,
- *        Crunchy Bridge, CockroachDB Cloud, Heroku, …)   → SSL.
+ *   3. Known managed-Postgres hostname → SSL enabled.
+ *        AWS RDS, Neon, Railway, Supabase, Render, Azure PG,
+ *        Cloud SQL, Digital Ocean, Aiven, CockroachDB Cloud,
+ *        Timescale, Crunchy Bridge, Fly.io, Scaleway, ElephantSQL.
  *
- *   4. Fallback for anything we can't classify: plain TCP. The safe
- *      choice for an unknown host inside a private network — cloud
- *      providers already match rule 3, and an operator behind a
- *      corporate proxy can always set DATABASE_SSL=true.
+ *   4. URL `sslmode=…` (anything other than disable) → SSL enabled.
  *
- * `rejectUnauthorized: false` is deliberate for cloud PG: RDS/Neon/etc.
- * present certs signed by internal CAs the pg client doesn't ship a
- * trust bundle for. Anyone needing full validation can set
- * `DATABASE_SSL_CA=/path/to/ca.pem` — the resolver switches to
- * `rejectUnauthorized: true` and loads the CA.
+ *   5. DATABASE_SSL / PGSSLMODE env explicitly on → SSL enabled.
+ *
+ *   6. Fallback: plain TCP. The correct default for unknown hosts on
+ *      a private network. Cloud providers already match rule 3;
+ *      corporate proxies can flip via DATABASE_SSL=true.
+ *
+ * `rejectUnauthorized: false` is the default when SSL is enabled — RDS,
+ * Neon, and friends present certs signed by internal CAs that Node's
+ * bundled trust store doesn't cover. Anyone who wants full validation
+ * sets DATABASE_SSL_CA=/path/to/ca.pem and the resolver switches to
+ * `rejectUnauthorized: true` with the CA loaded.
  */
 
 import fs from "fs";
@@ -49,6 +58,7 @@ export type SslConfig = false | { rejectUnauthorized: boolean; ca?: string };
 export interface SslResolution {
   ssl: SslConfig;
   reason: string;
+  host: string | null;
 }
 
 const PRIVATE_HOST_PATTERNS: RegExp[] = [
@@ -80,7 +90,7 @@ const CLOUD_HOST_PATTERNS: RegExp[] = [
   // AWS RDS + Aurora
   /\.rds\.amazonaws\.com$/i,
   /\.cluster-.*\.rds\.amazonaws\.com$/i,
-  // Neon (all serverless projects; also the pooler subdomain)
+  // Neon
   /\.neon\.tech$/i,
   /\.neon\.build$/i,
   /-pooler\..*\.neon\.tech$/i,
@@ -94,7 +104,7 @@ const CLOUD_HOST_PATTERNS: RegExp[] = [
   // Render
   /\.render\.com$/i,
   /-postgres\.render\.com$/i,
-  // Azure Database for PostgreSQL (single server + flexible server)
+  // Azure Database for PostgreSQL
   /\.postgres\.database\.azure\.com$/i,
   /\.database\.azure\.com$/i,
   // Google Cloud SQL public endpoint
@@ -104,23 +114,26 @@ const CLOUD_HOST_PATTERNS: RegExp[] = [
   /\.db\.ondigitalocean\.com$/i,
   // Aiven
   /\.aivencloud\.com$/i,
-  // CockroachDB Cloud (Postgres-compatible)
+  // CockroachDB Cloud (Postgres wire-compatible)
   /\.cockroachlabs\.cloud$/i,
   // TimescaleDB Cloud
   /\.timescale\.com$/i,
   /\.tsdb\.cloud\.timescale\.com$/i,
   // Crunchy Bridge
   /\.crunchybridge\.com$/i,
-  // ElephantSQL (legacy — RIP but still around)
+  // ElephantSQL
   /\.elephantsql\.com$/i,
   // Heroku Postgres
-  /\.compute-1\.amazonaws\.com$/i,     // Heroku PG hostnames
+  /\.compute-1\.amazonaws\.com$/i,
   /\.compute\.amazonaws\.com$/i,
   // Fly.io
   /\.fly\.dev$/i,
   // Scaleway Managed
   /\.scw\.cloud$/i,
 ];
+
+const EXPLICIT_OFF = new Set(["false", "0", "disable", "off", "no"]);
+const EXPLICIT_ON  = new Set(["true", "1", "require", "verify-ca", "verify-full", "prefer", "allow", "on", "yes"]);
 
 export function parseHostFromUrl(url: string): string | null {
   try {
@@ -139,33 +152,6 @@ export function isCloudHost(host: string): boolean {
   return CLOUD_HOST_PATTERNS.some((re) => re.test(host));
 }
 
-function envSslOverride(): SslResolution | null {
-  const raw = (process.env.DATABASE_SSL ?? process.env.PGSSLMODE ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  if (["false", "0", "disable", "off", "no"].includes(raw)) {
-    return { ssl: false, reason: `DATABASE_SSL/PGSSLMODE="${raw}"` };
-  }
-  if (["true", "1", "require", "verify-ca", "verify-full", "prefer", "allow", "on", "yes"].includes(raw)) {
-    return { ssl: buildSslConfig(), reason: `DATABASE_SSL/PGSSLMODE="${raw}"` };
-  }
-  return null;
-}
-
-function urlSslMode(url: string): SslResolution | null {
-  try {
-    const u = new URL(url);
-    const raw = (u.searchParams.get("sslmode") ?? "").trim().toLowerCase();
-    if (!raw) return null;
-    if (raw === "disable") return { ssl: false, reason: `sslmode=disable in URL` };
-    if (["require", "verify-ca", "verify-full", "prefer", "allow"].includes(raw)) {
-      return { ssl: buildSslConfig(), reason: `sslmode=${raw} in URL` };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function buildSslConfig(): { rejectUnauthorized: boolean; ca?: string } {
   const caPath = process.env.DATABASE_SSL_CA;
   if (caPath && fs.existsSync(caPath)) {
@@ -173,10 +159,37 @@ function buildSslConfig(): { rejectUnauthorized: boolean; ca?: string } {
       const ca = fs.readFileSync(caPath, "utf8");
       return { rejectUnauthorized: true, ca };
     } catch {
-      // fall through to permissive TLS
+      // fall through
     }
   }
   return { rejectUnauthorized: false };
+}
+
+interface UrlHints {
+  sslModeLower: string | null;
+}
+function urlHints(url: string): UrlHints {
+  try {
+    const u = new URL(url);
+    const raw = (u.searchParams.get("sslmode") ?? "").trim().toLowerCase();
+    return { sslModeLower: raw || null };
+  } catch {
+    return { sslModeLower: null };
+  }
+}
+
+function envHint(): { setting: "on" | "off" | null; source: string } {
+  const rawDatabaseSsl = (process.env.DATABASE_SSL ?? "").trim().toLowerCase();
+  if (rawDatabaseSsl) {
+    if (EXPLICIT_OFF.has(rawDatabaseSsl)) return { setting: "off", source: `DATABASE_SSL="${rawDatabaseSsl}"` };
+    if (EXPLICIT_ON.has(rawDatabaseSsl))  return { setting: "on",  source: `DATABASE_SSL="${rawDatabaseSsl}"` };
+  }
+  const rawPgssl = (process.env.PGSSLMODE ?? "").trim().toLowerCase();
+  if (rawPgssl) {
+    if (EXPLICIT_OFF.has(rawPgssl)) return { setting: "off", source: `PGSSLMODE="${rawPgssl}"` };
+    if (EXPLICIT_ON.has(rawPgssl))  return { setting: "on",  source: `PGSSLMODE="${rawPgssl}"` };
+  }
+  return { setting: null, source: "" };
 }
 
 /**
@@ -185,29 +198,47 @@ function buildSslConfig(): { rejectUnauthorized: boolean; ca?: string } {
  * file. Safe to call at boot.
  */
 export function resolveSslConfig(databaseUrl: string): SslResolution {
-  // 1. env var override wins.
-  const envOverride = envSslOverride();
-  if (envOverride) return envOverride;
-
-  // 2. URL sslmode= param wins next.
-  const urlOverride = urlSslMode(databaseUrl);
-  if (urlOverride) return urlOverride;
-
-  // 3. Hostname classification.
   const host = parseHostFromUrl(databaseUrl);
-  if (!host) {
-    return { ssl: false, reason: "could not parse hostname from DATABASE_URL — defaulting to plain TCP" };
+  const url = urlHints(databaseUrl);
+  const env = envHint();
+
+  // ---- 1. Explicit disable wins unconditionally --------------------------
+  if (url.sslModeLower === "disable") {
+    return { ssl: false, reason: `sslmode=disable in DATABASE_URL`, host };
   }
-  if (isPrivateHost(host)) {
-    return { ssl: false, reason: `private / in-cluster host "${host}"` };
-  }
-  if (isCloudHost(host)) {
-    return { ssl: buildSslConfig(), reason: `managed-Postgres host "${host}"` };
+  if (env.setting === "off") {
+    return { ssl: false, reason: env.source, host };
   }
 
-  // 4. Unknown public host → err on the side of no TLS. Operator can flip
-  //    via DATABASE_SSL=true. This is the correct default for private
-  //    networks / VPC-peered clusters where the DB is reachable by
-  //    hostname but does not offer TLS.
-  return { ssl: false, reason: `unknown host "${host}" — defaulting to plain TCP (set DATABASE_SSL=true to force SSL)` };
+  // ---- 2. Private / in-cluster hostname authoritative --------------------
+  //  This is the FIX for the EC2 symptom: any container-Postgres URL wins
+  //  over inherited PGSSLMODE=require. The only way to opt back into SSL
+  //  for a private host is to put ?sslmode=require directly on the URL.
+  if (host && isPrivateHost(host)) {
+    if (url.sslModeLower && url.sslModeLower !== "disable") {
+      return { ssl: buildSslConfig(), reason: `private host "${host}" but sslmode=${url.sslModeLower} in URL forces SSL`, host };
+    }
+    return { ssl: false, reason: `private / in-cluster host "${host}" — SSL never negotiated`, host };
+  }
+
+  // ---- 3. Known managed-Postgres hostname → SSL --------------------------
+  if (host && isCloudHost(host)) {
+    return { ssl: buildSslConfig(), reason: `managed-Postgres host "${host}"`, host };
+  }
+
+  // ---- 4. URL sslmode= (anything other than disable) → SSL ---------------
+  if (url.sslModeLower && url.sslModeLower !== "disable") {
+    return { ssl: buildSslConfig(), reason: `sslmode=${url.sslModeLower} in DATABASE_URL`, host };
+  }
+
+  // ---- 5. Explicit "on" env → SSL ---------------------------------------
+  if (env.setting === "on") {
+    return { ssl: buildSslConfig(), reason: env.source, host };
+  }
+
+  // ---- 6. Fallback: plain TCP -------------------------------------------
+  if (!host) {
+    return { ssl: false, reason: "could not parse hostname from DATABASE_URL — defaulting to plain TCP", host: null };
+  }
+  return { ssl: false, reason: `unknown host "${host}" — defaulting to plain TCP (set DATABASE_SSL=true to force SSL)`, host };
 }

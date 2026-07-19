@@ -64,6 +64,19 @@ function rewriteLocalhostForDocker(rawUrl: string): { url: string; rewritten: bo
 const { url: effectiveDatabaseUrl, rewritten } = rewriteLocalhostForDocker(config.databaseUrl);
 const sslResolution = resolveSslConfig(effectiveDatabaseUrl);
 
+// Belt-and-braces: prevent the pg driver from reading PGSSLMODE / PGSSL* on
+// its own if we've decided SSL is off. `ssl: false` in the Pool config
+// already wins in node-pg >=8, but stripping the env is a safety net for
+// any transitive lib that reaches for the env var directly.
+if (sslResolution.ssl === false) {
+  delete process.env.PGSSLMODE;
+  delete process.env.PGSSL;
+  delete process.env.PGSSLCERT;
+  delete process.env.PGSSLKEY;
+  delete process.env.PGSSLROOTCERT;
+  delete process.env.PGSSLCRL;
+}
+
 if (rewritten) {
   const safe = effectiveDatabaseUrl.replace(/:\/\/[^:]+:[^@]+@/, "://***:***@");
   console.warn(
@@ -72,7 +85,7 @@ if (rewritten) {
 }
 
 console.log(
-  `[db.pool] ssl=${sslResolution.ssl === false ? "disabled" : "enabled"} (${sslResolution.reason})`
+  `[db.pool] host=${sslResolution.host ?? "?"} ssl=${sslResolution.ssl === false ? "disabled" : "enabled"} — ${sslResolution.reason}`
 );
 
 export const pool = new pg.Pool({
