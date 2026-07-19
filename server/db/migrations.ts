@@ -497,7 +497,14 @@ const STATEMENTS: string[] = [
 
   // Extend `emails` table with tracking + follow-up columns.
   // ADD COLUMN IF NOT EXISTS is a Postgres 9.6+ feature and idempotent.
-  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS sender_identity_id VARCHAR REFERENCES sender_identities(id)`,
+  //
+  // NOTE: this column originally FK'd sender_identities(id), which was
+  // renamed to email_accounts by the DO $do$ block above. On a fresh DB
+  // sender_identities never exists, so we add the column WITHOUT the FK
+  // here — the retargeting DO block below re-adds the FK against
+  // email_accounts once we know that table exists. Old databases keep
+  // their FK unchanged; the retarget block is a no-op for them.
+  `ALTER TABLE emails ADD COLUMN IF NOT EXISTS sender_identity_id VARCHAR`,
   `ALTER TABLE emails ADD COLUMN IF NOT EXISTS follow_up_of VARCHAR REFERENCES emails(id) ON DELETE SET NULL`,
   `ALTER TABLE emails ADD COLUMN IF NOT EXISTS follow_up_step INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE emails ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ`,

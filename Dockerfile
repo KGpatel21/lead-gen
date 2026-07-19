@@ -59,8 +59,12 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # ---- 5. Runner --------------------------------------------------------------
 FROM base AS runner
+# `RUNNING_IN_DOCKER=true` is a belt-and-braces signal for
+# server/db/pool.ts so the localhost→postgres rewrite fires reliably
+# even in stripped images that don't carry /.dockerenv.
 ENV NODE_ENV=production \
     PORT=3000 \
+    RUNNING_IN_DOCKER=true \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
 # Drop root: the `node` user ships with the official image.

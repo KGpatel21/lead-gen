@@ -496,7 +496,48 @@ Restore is guarded (requires typing the DB name to confirm):
 sudo ./scripts/restore-db.sh /var/backups/outbound/outbound-outbound_ai-20260119-030001.sql.gz
 ```
 
-### 6. Required environment (production `.env`)
+### 6. Choosing the right `DATABASE_URL` (and SSL)
+
+`server/db/pool.ts` calls `resolveSslConfig()` (in
+`server/db/sslMode.ts`) on boot. It picks the correct `ssl` setting
+based on the URL's hostname + a small set of env overrides — no
+per-environment code changes required.
+
+**Resolution order** (higher wins):
+
+1. `DATABASE_SSL` or `PGSSLMODE` env — `true`/`require`/`prefer` forces
+   SSL, `false`/`disable` forces plain TCP.
+2. `?sslmode=…` query param on the URL — same semantics.
+3. Hostname patterns — private hosts (localhost, RFC1918, Docker
+   Compose service names, `.internal`, `.svc.cluster.local`) → plain
+   TCP; managed-Postgres suffixes (AWS RDS, Neon, Railway, Supabase,
+   Render, Azure, Aiven, DO, Timescale, Crunchy Bridge, CockroachDB
+   Cloud, Fly.io, Scaleway) → SSL with `rejectUnauthorized=false`.
+4. Anything else → plain TCP (safe default for private networks).
+
+Set `DATABASE_SSL_CA=/path/to/ca.pem` to switch to full validation
+(`rejectUnauthorized=true` with the CA bundle).
+
+**When a Node process is running inside a container** (detected via
+`/.dockerenv`, `/run/.containerenv`, `/proc/1/cgroup`, or the
+`RUNNING_IN_DOCKER=true` env baked into our production image) and
+`DATABASE_URL` still points at `localhost` / `127.0.0.1`, the pool
+transparently rewrites the hostname to `postgres` (or whatever
+`COMPOSE_PG_HOSTNAME` is set to). This is a defence-in-depth safety
+net for the case where a stale `.env` gets bind-mounted in.
+
+#### The three DATABASE_URLs
+
+| Scenario | DATABASE_URL | SSL behaviour |
+|---|---|---|
+| **Local laptop dev** (`npm run dev` — Postgres on host machine) | `postgresql://postgres:root@localhost:5432/outbound_ai` | `ssl=disabled` (private host `localhost`) |
+| **EC2 Docker Compose** (this repo's `docker-compose.yml`) | `postgresql://outbound:<POSTGRES_PASSWORD>@postgres:5432/outbound_ai` — **auto-built by compose from `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`. You do not write this URL yourself.** | `ssl=disabled` (private host `postgres`) |
+| **Managed cloud Postgres** (RDS / Neon / Railway / Supabase / Render / Azure / …) | e.g. `postgresql://user:pw@prod-1.abcd1234.us-east-1.rds.amazonaws.com:5432/outbound_ai` — set in `.env` as `DATABASE_URL_DOCKER=…` so it wins over the compose default. | `ssl=enabled` (cloud hostname pattern) with `rejectUnauthorized=false`. Add `?sslmode=require` or `DATABASE_SSL=true` if your provider requires it explicitly. |
+
+You never need to hand-edit anything in `pool.ts` when moving between
+these — the URL alone determines the correct behaviour.
+
+### 7. Required environment (production `.env`)
 
 ```dotenv
 # --- Required for every environment (config.ts refuses to boot without these) ---
@@ -524,7 +565,7 @@ PUBLIC_BASE_URL=https://outbound.your-domain.com
 `server/config.ts` performs fail-fast validation on boot — a missing or
 under-length secret aborts startup with a clear error message.
 
-### 7. Verifying the deployment
+### 8. Verifying the deployment
 
 ```bash
 # Health of every internal service.
