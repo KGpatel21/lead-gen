@@ -14,7 +14,8 @@
  * Real-time refresh every 8s via the workspace dashboard endpoint.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { usePolling } from "../hooks/usePolling";
 import {
   Bot, Calendar, ChevronDown, ChevronUp, Clock, GitBranch, Layers, Loader2, Mail, Pause,
   Play, Plus, RefreshCw, Save, Send, Sparkles, Trash2, TrendingUp, Type, Users, X,
@@ -262,14 +263,21 @@ export default function SequenceBuilderView({ campaigns, onRefresh }: Props) {
   }, []);
 
   useEffect(() => { loadSteps(); loadDashboard(); }, [loadSteps, loadDashboard]);
-  useEffect(() => {
-    loadWorkspaceDashboard();
-    const t = setInterval(() => {
-      loadWorkspaceDashboard();
-      loadDashboard();
-    }, 8000);
-    return () => clearInterval(t);
+  useEffect(() => { loadWorkspaceDashboard(); }, [loadWorkspaceDashboard]);
+
+  // Single polling loop covers BOTH endpoints. Was firing two separate
+  // requests every 8 s with no in-flight guard and no visibility check —
+  // that stacked up quickly and was a major contributor to the "failed to
+  // fetch" storm on slower networks.
+  const dashboardTick = useCallback(async () => {
+    await Promise.allSettled([loadWorkspaceDashboard(), loadDashboard()]);
   }, [loadWorkspaceDashboard, loadDashboard]);
+
+  usePolling(dashboardTick, {
+    intervalMs: 20_000,       // was 8 s; still feels live for a builder view
+    fireOnMount: false,
+    onError: (err) => console.warn("[SequenceBuilder] dashboard poll failed:", err),
+  });
 
   const patchStep = (idx: number, patch: Partial<SequenceStepDto>) => {
     setSteps((cur) => cur.map((s, i) => (i === idx ? { ...s, ...patch } : s)));

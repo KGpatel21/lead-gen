@@ -28,6 +28,7 @@ import {
 
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ToastProvider, useToast } from "./context/ToastContext";
+import { usePolling } from "./hooks/usePolling";
 import {
   campaignsApi, smtpApi, domainsApi, repliesApi, teamApi, templatesApi, dashboardApi,
   DashboardStats,
@@ -75,6 +76,9 @@ function AuthedApp() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [stats, setStats] = useState<DashboardStats>(emptyStats);
 
+  // User-initiated errors ALWAYS toast (button clicks, form submits).
+  // Background polling errors only toast on the 3rd consecutive failure
+  // and only from ONE central slot (see silentPollError below).
   const surfaceError = useCallback(
     (label: string, err: unknown) => {
       const msg = err instanceof ApiError ? err.message : (err as Error)?.message || String(err);
@@ -84,48 +88,84 @@ function AuthedApp() {
     [toast]
   );
 
-  // ---- Data fetchers ----
+  const silentPollError = useCallback(
+    (label: string, err: unknown) => {
+      const msg = err instanceof ApiError ? err.message : (err as Error)?.message || String(err);
+      console.warn(`[poll:${label}]`, msg);
+    },
+    []
+  );
+
+  // ---- Data fetchers (silent — call sites decide whether to toast) ----
   const fetchStats = useCallback(async () => {
-    try { setStats(await dashboardApi.stats()); }
-    catch (err) { surfaceError("Dashboard stats", err); }
-  }, [surfaceError]);
+    setStats(await dashboardApi.stats());
+  }, []);
 
   const fetchCampaigns = useCallback(async () => {
-    try { setCampaigns(await campaignsApi.list()); }
-    catch (err) { surfaceError("Campaigns", err); }
-  }, [surfaceError]);
+    setCampaigns(await campaignsApi.list());
+  }, []);
 
   const fetchSmtp = useCallback(async () => {
-    try { setSmtpAccounts(await smtpApi.list()); }
-    catch (err) { surfaceError("SMTP accounts", err); }
-  }, [surfaceError]);
+    setSmtpAccounts(await smtpApi.list());
+  }, []);
 
   const fetchDomains = useCallback(async () => {
-    try { setDomains(await domainsApi.list()); }
-    catch (err) { surfaceError("Domains", err); }
-  }, [surfaceError]);
+    setDomains(await domainsApi.list());
+  }, []);
 
   const fetchReplies = useCallback(async () => {
-    try { setReplies(await repliesApi.list()); }
-    catch (err) { surfaceError("Replies", err); }
-  }, [surfaceError]);
+    setReplies(await repliesApi.list());
+  }, []);
 
   const fetchTeam = useCallback(async () => {
-    try { setTeamMembers(await teamApi.list()); }
-    catch (err) { surfaceError("Team", err); }
-  }, [surfaceError]);
+    setTeamMembers(await teamApi.list());
+  }, []);
 
+  // Cold-boot fetch: sequenced with a small gap so we don't fire six
+  // parallel requests at page load (rate-limit bursts + browser HTTP
+  // connection contention were causing "failed to fetch" storms).
+  // Errors are logged only — the polling loop below will retry.
   const fetchAllSaaSData = useCallback(async () => {
-    await Promise.all([fetchStats(), fetchCampaigns(), fetchSmtp(), fetchDomains(), fetchReplies(), fetchTeam()]);
-  }, [fetchStats, fetchCampaigns, fetchSmtp, fetchDomains, fetchReplies, fetchTeam]);
+    const jobs: Array<[string, () => Promise<void>]> = [
+      ["stats", fetchStats],
+      ["campaigns", fetchCampaigns],
+      ["replies", fetchReplies],
+      ["smtp", fetchSmtp],
+      ["domains", fetchDomains],
+      ["team", fetchTeam],
+    ];
+    for (const [label, fn] of jobs) {
+      try { await fn(); } catch (err) { silentPollError(label, err); }
+    }
+  }, [fetchStats, fetchCampaigns, fetchReplies, fetchSmtp, fetchDomains, fetchTeam, silentPollError]);
 
-  useEffect(() => {
-    fetchAllSaaSData();
-    const ticker = setInterval(() => {
-      Promise.all([fetchStats(), fetchCampaigns(), fetchReplies()]).catch(() => {});
-    }, 15_000);
-    return () => clearInterval(ticker);
-  }, [fetchAllSaaSData, fetchStats, fetchCampaigns, fetchReplies]);
+  useEffect(() => { fetchAllSaaSData(); }, [fetchAllSaaSData]);
+
+  // Background refresh — three lightweight endpoints, once every 30 s,
+  // pauses when the tab is hidden, backs off after transient failures,
+  // never overlaps with itself.
+  const backgroundTick = useCallback(async () => {
+    // In-hook helper: run each sub-fetch independently so one failure
+    // doesn't cancel the others. Errors are still caught by usePolling
+    // (this whole function throws only if ALL of them throw).
+    const results = await Promise.allSettled([
+      fetchStats(), fetchCampaigns(), fetchReplies(),
+    ]);
+    const failures = results.filter((r) => r.status === "rejected");
+    if (failures.length === results.length) {
+      // Every sub-fetch failed — surface the first one so usePolling counts
+      // it as a real failure and applies backoff.
+      throw (failures[0] as PromiseRejectedResult).reason;
+    }
+    // Log partial failures but don't count as an error for backoff purposes.
+    for (const f of failures) silentPollError("bg", (f as PromiseRejectedResult).reason);
+  }, [fetchStats, fetchCampaigns, fetchReplies, silentPollError]);
+
+  usePolling(backgroundTick, {
+    intervalMs: 30_000,       // was 15 s — halves steady-state load
+    fireOnMount: false,       // cold-boot already handled above
+    onError: (err) => silentPollError("background", err),
+  });
 
   // ---- Action handlers ----
   const handleCampaignStatusChange = async (id: string, newStatus: CampaignStatus) => {

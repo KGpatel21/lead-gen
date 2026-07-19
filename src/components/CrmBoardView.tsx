@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { usePolling } from "../hooks/usePolling";
 import {
   Users2,
   Search,
@@ -73,14 +74,8 @@ export default function CrmBoardView({ campaigns, onRefreshAllData }: CrmBoardVi
   // Automation Worker State
   const [runningAutomationTask, setRunningAutomationTask] = useState<string | null>(null);
 
-  // Fetch leads on mount and periodically
-  useEffect(() => {
-    fetchLeads();
-    const interval = setInterval(fetchLeads, 6000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchLeads = async () => {
+  // Fetch leads on mount; usePolling handles the periodic refresh.
+  const fetchLeads = useCallback(async () => {
     try {
       const res = await fetch("/api/leads");
       if (res.ok) {
@@ -88,13 +83,20 @@ export default function CrmBoardView({ campaigns, onRefreshAllData }: CrmBoardVi
         if (json.success && Array.isArray(json.data)) {
           setLeads(json.data);
         }
+      } else {
+        throw new Error(`HTTP ${res.status}`);
       }
-    } catch (err) {
-      console.error("Failed to load CRM leads:", err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  usePolling(fetchLeads, {
+    intervalMs: 20_000,           // was 6 s — the CRM board doesn't change every 6 s
+    fireOnMount: true,
+    initialDelayMs: 300,          // let App.tsx's cold-boot burst finish first
+    onError: (err) => console.warn("[CrmBoard] poll failed:", err),
+  });
 
   const addNotification = (message: string, type: "info" | "success" | "warn" = "info") => {
     setNotifications(prev => [
