@@ -94,16 +94,21 @@ router.post("/campaigns/:id/ai-bulk-enrich-research", authenticateJwt, LeadContr
 // --- SMTP & DELIVERABILITY ---
 router.get("/smtp", authenticateJwt, SmtpController.getSmtpAccounts);
 router.get("/smtp-accounts", authenticateJwt, SmtpController.getSmtpAccounts);
+// `name` is intentionally NOT in the validation schema: SmtpController.createSmtpAccount
+// never reads req.body.name (the display label is derived from email + username),
+// and the "Add SMTP Account" form in src/components/InboxesView.tsx does not send one.
+// Including it here previously rejected every legitimate request with
+// "Validation Error: Field 'name' is required."
 router.post(
   "/smtp",
   authenticateJwt,
-  validatePayload({ name: "string", email: "string", smtpHost: "string", smtpPort: "number" }),
+  validatePayload({ email: "string", smtpHost: "string", smtpPort: "number" }),
   SmtpController.createSmtpAccount
 );
 router.post(
   "/smtp-accounts",
   authenticateJwt,
-  validatePayload({ name: "string", email: "string", smtpHost: "string", smtpPort: "number" }),
+  validatePayload({ email: "string", smtpHost: "string", smtpPort: "number" }),
   SmtpController.createSmtpAccount
 );
 router.put("/smtp/:id", authenticateJwt, SmtpController.updateSmtpAccount);
