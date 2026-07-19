@@ -53,6 +53,18 @@ async function main() {
   log("HTTP " + health.status + " healthy", health.json?.healthy);
   log("workers", health.json?.workers);
 
+  // Safety net: add the test recipient to the workspace suppression list
+  // BEFORE any campaign is enrolled so the emailDispatchService short-
+  // circuits to FAILED instead of dispatching a real message. Prevents
+  // the smoke test from ever generating a real bounce through SES / SMTP.
+  const smokeRecipient = `smoke.${Date.now()}@example.com`;
+  await api("POST", "/api/suppressions", token, {
+    email: smokeRecipient,
+    reason: "manual",
+    notes: "phase5_smoke.cjs — dry-run guard so no real send leaves the box",
+  });
+  log("suppressed", smokeRecipient);
+
   hdr("3. Create/find campaign + build sequence");
   const campName = `Phase5-Smoke-${Date.now()}`;
   const created = await api("POST", "/api/campaigns", token, { name: campName });
@@ -81,7 +93,7 @@ async function main() {
 
   hdr("4. Add a lead and enroll into campaign");
   const lead = await api("POST", `/api/campaigns/${campaign.id}/leads`, token, {
-    email: `smoke.${Date.now()}@example.com`,
+    email: smokeRecipient,
     firstName: "Test", lastName: "Prospect", company: "Acme LLC", personalizedLine: "loved the recent expansion",
   });
   const leadId = lead.json?.lead?.id;
