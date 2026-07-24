@@ -21,6 +21,14 @@ import { FollowUpController } from "../controllers/followUp.controller";
 import { TemplatesController } from "../controllers/templates.controller";
 import { CampaignAutomationController } from "../controllers/campaignAutomation.controller";
 import { CampaignDashboardController } from "../controllers/campaignDashboard.controller";
+import { KnowledgeBaseController, knowledgeUpload } from "../controllers/knowledgeBase.controller";
+import {
+  SignatureController,
+  EmailTemplateV2Controller,
+  PromptController,
+  CampaignResourceController,
+  KnowledgeAdminController,
+} from "../controllers/knowledgeCenter.controller";
 import { authenticateJwt, requireRole } from "../middleware/auth.middleware";
 import { workspaceContextMiddleware } from "../middleware/workspaceContext.middleware";
 import { rateLimiter } from "../middleware/rateLimiter.middleware";
@@ -244,6 +252,58 @@ router.delete("/campaigns/holidays/:holidayId", ...authWithWorkspace, CampaignAu
 // Dashboards
 router.get("/campaigns/dashboard", ...authWithWorkspace, CampaignDashboardController.workspace);
 router.get("/campaigns/:id/dashboard", ...authWithWorkspace, CampaignDashboardController.oneCampaign);
+
+// --- KNOWLEDGE CENTER (Phase 6) ---
+// Embedding provider catalogue.
+router.get("/knowledge/providers/embedding", ...authWithWorkspace, KnowledgeBaseController.providers);
+
+// Knowledge Bases + Files.
+router.get("/knowledge-bases",                        ...authWithWorkspace, KnowledgeBaseController.list);
+router.post("/knowledge-bases",                       ...authWithWorkspace, KnowledgeBaseController.create);
+router.get("/knowledge-bases/:id",                    ...authWithWorkspace, KnowledgeBaseController.get);
+router.put("/knowledge-bases/:id",                    ...authWithWorkspace, KnowledgeBaseController.update);
+router.delete("/knowledge-bases/:id",                 ...authWithWorkspace, KnowledgeBaseController.remove);
+router.get("/knowledge-bases/:id/files",              ...authWithWorkspace, KnowledgeBaseController.listFiles);
+router.post("/knowledge-bases/:id/files",             ...authWithWorkspace, knowledgeUpload.array("files", 20), KnowledgeBaseController.uploadFile);
+router.delete("/knowledge-bases/:id/files/:fileId",   ...authWithWorkspace, KnowledgeBaseController.deleteFile);
+router.post("/knowledge-bases/:id/search",            ...authWithWorkspace, KnowledgeBaseController.search);
+router.post("/knowledge-bases/search",                ...authWithWorkspace, KnowledgeBaseController.search);
+
+// Signatures.
+router.get("/signatures",                             ...authWithWorkspace, SignatureController.list);
+router.post("/signatures",                            ...authWithWorkspace, SignatureController.create);
+router.get("/signatures/:id",                         ...authWithWorkspace, SignatureController.get);
+router.put("/signatures/:id",                         ...authWithWorkspace, SignatureController.update);
+router.delete("/signatures/:id",                      ...authWithWorkspace, SignatureController.remove);
+router.get("/signatures/:id/versions",                ...authWithWorkspace, SignatureController.versions);
+router.get("/signatures/:id/preview",                 ...authWithWorkspace, SignatureController.preview);
+
+// Email Templates (V2 — enterprise).
+router.get("/email-templates",                        ...authWithWorkspace, EmailTemplateV2Controller.list);
+router.post("/email-templates",                       ...authWithWorkspace, EmailTemplateV2Controller.create);
+router.get("/email-templates/:id",                    ...authWithWorkspace, EmailTemplateV2Controller.get);
+router.put("/email-templates/:id",                    ...authWithWorkspace, EmailTemplateV2Controller.update);
+router.post("/email-templates/:id/duplicate",         ...authWithWorkspace, EmailTemplateV2Controller.duplicate);
+router.delete("/email-templates/:id",                 ...authWithWorkspace, EmailTemplateV2Controller.remove);
+router.post("/email-templates/:id/preview",           ...authWithWorkspace, EmailTemplateV2Controller.preview);
+
+// Prompt Library.
+router.get("/prompts",                                ...authWithWorkspace, PromptController.list);
+router.post("/prompts",                               ...authWithWorkspace, PromptController.create);
+router.get("/prompts/:id",                            ...authWithWorkspace, PromptController.get);
+router.put("/prompts/:id",                            ...authWithWorkspace, PromptController.update);
+router.post("/prompts/:id/duplicate",                 ...authWithWorkspace, PromptController.duplicate);
+router.delete("/prompts/:id",                         ...authWithWorkspace, PromptController.remove);
+
+// Campaign resource selector.
+router.get("/campaigns/:id/resources",                ...authWithWorkspace, CampaignResourceController.get);
+router.put("/campaigns/:id/resources/knowledge-bases", ...authWithWorkspace, CampaignResourceController.setKbs);
+router.put("/campaigns/:id/resources/templates",       ...authWithWorkspace, CampaignResourceController.setTemplates);
+router.put("/campaigns/:id/resources/signatures",      ...authWithWorkspace, CampaignResourceController.setSignatures);
+router.put("/campaigns/:id/resources/prompts",         ...authWithWorkspace, CampaignResourceController.setPrompts);
+
+// Knowledge Center admin dashboard.
+router.get("/knowledge/admin/dashboard",              ...authWithWorkspace, KnowledgeAdminController.dashboard);
 
 // --- SUPPRESSION LIST (Phase 3) ---
 router.get("/suppressions", authenticateJwt, SuppressionController.list);

@@ -795,6 +795,80 @@ Everything below has to be provisioned by the account owner outside this repo.
 
 **Firecrawl:** no external setup — the API key alone is enough.
 
+## Knowledge Center (Phase 6)
+
+The **Knowledge Center** turns Outbound.AI into a RAG-aware platform.
+Every campaign can be assigned any combination of:
+
+- **Knowledge Bases** — folders of PDF/DOCX/TXT/MD/CSV/HTML uploads that
+  are extracted, chunked, and embedded via a pluggable provider
+  (**OpenAI**, **Voyage**, **Gemini**, **Ollama**). Cosine-similarity
+  search happens at compose time so the LLM only sees the top-K most
+  relevant chunks — never the whole document.
+- **Email Templates** (`email_templates` — the V2 enterprise table with
+  subject / HTML / text / variables / versions).
+- **Signatures** — app-owned footers appended to every send. Independent
+  of Gmail/SES/SMTP.
+- **Prompt Library** — reusable style / tone / structure instructions
+  merged into the AI request.
+
+Backend:
+- `server/db/repositories/knowledgeBase.repository.ts`,
+  `knowledgeFile.repository.ts`, `knowledgeChunk.repository.ts`
+- `server/services/knowledgeBase.service.ts` — upload → extract → chunk
+  → embed → store, plus `retrieveContext(query)` for RAG.
+- `server/ai/embedding/*` — provider abstraction (OpenAI / Voyage /
+  Gemini / Ollama), factory-selected per Knowledge Base.
+- `server/services/textExtraction.service.ts` (pdf-parse, mammoth,
+  cheerio) + `chunking.service.ts` (sliding-window with overlap).
+- `server/db/repositories/campaignResource.repository.ts` — junction
+  tables `campaign_knowledge_bases`, `campaign_email_templates`,
+  `campaign_signatures`, `campaign_prompts`.
+- `server/services/sequenceComposer.service.ts` — automatically pulls
+  the assigned resources into every AI email compose.
+
+REST:
+
+```
+GET/POST/PUT/DELETE  /api/knowledge-bases
+POST                 /api/knowledge-bases/:id/files    (multipart)
+DELETE               /api/knowledge-bases/:id/files/:fileId
+POST                 /api/knowledge-bases/:id/search   (RAG retrieval)
+GET                  /api/knowledge/providers/embedding
+
+GET/POST/PUT/DELETE  /api/signatures
+GET/POST/PUT/DELETE  /api/email-templates
+POST                 /api/email-templates/:id/duplicate
+POST                 /api/email-templates/:id/preview
+GET/POST/PUT/DELETE  /api/prompts
+POST                 /api/prompts/:id/duplicate
+
+GET  /api/campaigns/:id/resources
+PUT  /api/campaigns/:id/resources/knowledge-bases
+PUT  /api/campaigns/:id/resources/templates
+PUT  /api/campaigns/:id/resources/signatures
+PUT  /api/campaigns/:id/resources/prompts
+
+GET  /api/knowledge/admin/dashboard    (usage stats)
+```
+
+Frontend:
+
+- Sidebar → **Knowledge Center** (badge: `RAG`). Four tabs — Knowledge
+  Bases, Signatures, Email Templates, Prompt Library — plus an admin
+  usage panel.
+- Sequence Builder → **Resources** tab. Multi-select for each resource
+  type. No hidden defaults; selected resources are what the AI uses.
+
+Optional env for embedding providers:
+
+```dotenv
+OPENAI_API_KEY=sk-...           # openai (default embed provider)
+VOYAGE_API_KEY=pa-...           # voyage
+GEMINI_API_KEY=AIzaSy...        # gemini (also used by the LLM path)
+OLLAMA_BASE_URL=http://ollama:11434  # local models
+```
+
 ## Known Issues
 
 Items intentionally deferred beyond Phase 1:

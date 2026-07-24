@@ -23,11 +23,16 @@ import {
   leadRepository,
   campaignRepository,
   emailRepository,
+  campaignResourceRepository,
+  signatureRepository,
+  emailTemplateV2Repository,
+  promptRepository,
 } from "../db/repositories";
 import { Lead, Campaign } from "../../src/types";
 import { SequenceStep } from "../db/repositories/sequenceStep.repository";
 import { CampaignProspect } from "../db/repositories/campaignProspect.repository";
 import { aiService } from "./ai.service";
+import { knowledgeBaseService } from "./knowledgeBase.service";
 import { log } from "../observability/logger";
 import { Business } from "../db/repositories/business.repository";
 import { BusinessProfile } from "../db/repositories/businessProfile.repository";
@@ -130,26 +135,67 @@ export const sequenceComposerService = {
     const profile = business ? await businessProfileRepository.findByBusinessId(business.id) : null;
     const personalization = buildPersonalization(lead, business, profile);
 
+    // ---- Phase 6: pull assigned resources (KBs, template, signature, prompt) ----
+    const resources = await campaignResourceRepository.getSelection(
+      input.campaign.id, input.prospect.workspaceId
+    );
+
+    // Resolve signature (per-campaign primary → workspace default → none).
+    let signature = resources.primarySignatureId
+      ? await signatureRepository.findById(resources.primarySignatureId, input.prospect.workspaceId)
+      : null;
+    if (!signature) {
+      signature = await signatureRepository.findDefault(input.prospect.workspaceId);
+    }
+
+    // Resolve template — step-specific first, then any step-agnostic template.
+    let template = null;
+    const stepTplRef = resources.templateIds.find((t) => t.stepIndex === input.step.stepIndex);
+    const globalTplRef = resources.templateIds.find((t) => t.stepIndex === null);
+    const templateId = stepTplRef?.templateId ?? globalTplRef?.templateId;
+    if (templateId) {
+      template = await emailTemplateV2Repository.findById(templateId, input.prospect.workspaceId);
+    }
+
+    // Resolve prompt — step-specific first, then step-agnostic.
+    let promptRef = null;
+    const stepPromptRef = resources.promptIds.find((p) => p.stepIndex === input.step.stepIndex);
+    const globalPromptRef = resources.promptIds.find((p) => p.stepIndex === null);
+    const promptId = stepPromptRef?.promptId ?? globalPromptRef?.promptId;
+    if (promptId) {
+      promptRef = await promptRepository.findById(promptId, input.prospect.workspaceId);
+    }
+
     const substitutionVars: Record<string, string> = {
       firstName: lead.firstName || "",
       lastName: lead.lastName || "",
       company: lead.company || (business?.name || ""),
       email: lead.email || "",
+      industry: (lead as any).industry || profile?.extractedIndustry || "",
+      website: lead.website || business?.website || "",
+      city: (lead as any).city || (business?.address || "").split(",")[0] || "",
+      country: (lead as any).country || "",
       personalizedLine: personalization,
       senderName: input.senderName || "",
       senderCompany: input.senderCompany || "",
+      signature: signature?.textBody || "",
+      unsubscribe: "", // dispatcher injects the real one on send
+      custom: "",
     };
 
-    // Manual template path.
-    if (input.step.mode === "manual") {
-      const subject = substitute(input.step.subject || input.campaign.subjectTemplate || "Quick question for {{company}}", substitutionVars);
-      const bodyText = substitute(input.step.bodyText || input.campaign.bodyTemplate || "", substitutionVars);
-      const bodyHtml = input.step.bodyHtml
-        ? substitute(input.step.bodyHtml, substitutionVars)
-        : bodyText
-          .split(/\n{2,}/)
-          .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-          .join("\n");
+    // Manual template path — prefer the assigned V2 template over the raw step body.
+    if (input.step.mode === "manual" || template) {
+      const subjectSrc = template?.subject || input.step.subject || input.campaign.subjectTemplate || "Quick question for {{company}}";
+      const textSrc    = template?.textBody || input.step.bodyText || input.campaign.bodyTemplate || "";
+      const htmlSrc    = template?.htmlBody || input.step.bodyHtml || "";
+      const subject = substitute(subjectSrc, substitutionVars);
+      const bodyText = appendSignature(substitute(textSrc, substitutionVars), signature?.textBody);
+      const bodyHtml = htmlSrc
+        ? appendSignatureHtml(substitute(htmlSrc, substitutionVars), signature?.htmlBody)
+        : appendSignatureHtml(
+            bodyText.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("\n"),
+            signature?.htmlBody
+          );
       return {
         subject,
         bodyText,
@@ -161,7 +207,7 @@ export const sequenceComposerService = {
       };
     }
 
-    // AI path.
+    // AI path — mode is "ai" and no template was assigned to this step.
     const past = await loadPreviousEmails(input.campaign.id, (lead.email || "").toLowerCase());
     const replies = await loadReplies(input.campaign.id, input.prospect.workspaceId, (lead.email || "").toLowerCase());
 
@@ -169,12 +215,40 @@ export const sequenceComposerService = {
     const tone = (camp.defaultTone || "Consultative") as
       | "Direct" | "Warm" | "Consultative" | "Playful";
 
+    // ---- Phase 6: RAG retrieval from selected Knowledge Bases ----
+    let ragContext = "";
+    if (resources.knowledgeBaseIds.length > 0) {
+      try {
+        const ragQuery = [
+          camp.goal || "",
+          business?.name || lead.company || "",
+          business?.businessCategory || (lead as any).industry || "",
+          personalization,
+        ].filter(Boolean).join(" | ").slice(0, 800);
+        const hits = await knowledgeBaseService.retrieveContext({
+          workspaceId: input.prospect.workspaceId,
+          knowledgeBaseIds: resources.knowledgeBaseIds,
+          query: ragQuery || (business?.name || lead.company || "outreach"),
+          topK: 6,
+        });
+        ragContext = knowledgeBaseService.buildContextText(hits, 4000);
+      } catch (err: any) {
+        log.warn({ err: err?.message, campaignId: input.campaign.id }, "sequenceComposer: RAG retrieval failed — continuing without KB context");
+      }
+    }
+
+    // If a Prompt Library entry is assigned, merge its user_prompt into
+    // the instruction — the AI service still owns the JSON schema so we
+    // don't blow up the response format.
+    const promptSnippet = promptRef?.userPrompt ? `Follow this style guidance:\n${promptRef.userPrompt}` : "";
+
     // If we have a business, use the fact-grounded generator with follow-up
     // instructions + previous-thread context. Otherwise fall back to a
     // lead-based ask.
     if (business) {
       const instruction = [
         input.step.aiInstruction || "",
+        promptSnippet,
         past.length > 0
           ? `This is follow-up #${input.step.stepIndex}. Prior emails in the thread (most-recent first):\n${past
               .map((p) => `- Step ${p.step} — "${p.subject}": ${p.bodySnippet}`)
@@ -185,6 +259,9 @@ export const sequenceComposerService = {
           : "",
         `Personalization facts: ${personalization || "n/a"}.`,
         camp.goal ? `Overall campaign goal: ${camp.goal}` : "",
+        ragContext
+          ? `\n\nCOMPANY KNOWLEDGE (use these facts; never contradict them):\n${ragContext}`
+          : "",
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -204,8 +281,8 @@ export const sequenceComposerService = {
 
       return {
         subject,
-        bodyText: composed.bodyText,
-        bodyHtml: composed.bodyHtml,
+        bodyText: appendSignature(composed.bodyText, signature?.textBody),
+        bodyHtml: appendSignatureHtml(composed.bodyHtml, signature?.htmlBody),
         personalization,
         confidence: composed.confidenceScore ?? 0.75,
         tone: composed.emailTone || tone,
@@ -221,11 +298,11 @@ export const sequenceComposerService = {
       );
       const subject = substitute(pitch.subject, substitutionVars);
       const body = substitute(pitch.body, substitutionVars);
-      const bodyText = body;
-      const bodyHtml = body
-        .split(/\n{2,}/)
-        .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-        .join("\n");
+      const bodyText = appendSignature(body, signature?.textBody);
+      const bodyHtml = appendSignatureHtml(
+        body.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("\n"),
+        signature?.htmlBody
+      );
       return {
         subject,
         bodyText,
@@ -238,11 +315,17 @@ export const sequenceComposerService = {
     } catch (err: any) {
       log.warn({ err: err?.message, prospectId: input.prospect.id }, "sequenceComposer: fallback pitch failed");
       const subject = substitute(input.step.subject || input.campaign.subjectTemplate || "Following up on my note", substitutionVars);
-      const bodyText = substitute(input.step.bodyText || input.campaign.bodyTemplate || "", substitutionVars);
+      const bodyText = appendSignature(
+        substitute(input.step.bodyText || input.campaign.bodyTemplate || "", substitutionVars),
+        signature?.textBody
+      );
       return {
         subject,
         bodyText,
-        bodyHtml: bodyText.split(/\n{2,}/).map((p) => `<p>${p}</p>`).join(""),
+        bodyHtml: appendSignatureHtml(
+          bodyText.split(/\n{2,}/).map((p) => `<p>${p}</p>`).join(""),
+          signature?.htmlBody
+        ),
         personalization,
         confidence: 0.4,
         tone,
@@ -253,3 +336,14 @@ export const sequenceComposerService = {
 
   buildPersonalization,
 };
+
+// ---------------- Signature helpers ----------------
+function appendSignature(body: string, sig?: string): string {
+  if (!sig || !sig.trim()) return body;
+  const trimmed = body.trimEnd();
+  return `${trimmed}\n\n${sig.trim()}`;
+}
+function appendSignatureHtml(bodyHtml: string, sigHtml?: string): string {
+  if (!sigHtml || !sigHtml.trim()) return bodyHtml;
+  return `${bodyHtml}\n<div class="email-signature">${sigHtml}</div>`;
+}

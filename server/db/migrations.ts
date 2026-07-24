@@ -830,6 +830,242 @@ const STATEMENTS: string[] = [
 
   // Leads: allow explicit tz per lead (used by the working-calendar scheduler).
   `ALTER TABLE leads ADD COLUMN IF NOT EXISTS timezone VARCHAR`,
+
+  // =================================================================
+  // Phase 6: Knowledge Center — Knowledge Bases (RAG), Signatures,
+  // Email Template Library, Prompt Builder, Campaign Resource
+  // Selector. Every table:
+  //   • UUID primary key (server-generated via gen_random_uuid()).
+  //   • workspace_id + FK for isolation.
+  //   • created_at / updated_at audit fields.
+  //   • deleted_at for soft-delete.
+  // =================================================================
+
+  `CREATE EXTENSION IF NOT EXISTS pgcrypto`,
+
+  // -------- Knowledge Bases --------
+  //  status: DRAFT | INDEXING | READY | ERROR | ARCHIVED
+  //  embedding_model: e.g. "openai:text-embedding-3-small"
+  //  chunk_size / chunk_overlap: token-ish char counts controlling chunker
+  `CREATE TABLE IF NOT EXISTS knowledge_bases (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name              VARCHAR NOT NULL,
+    description       TEXT,
+    tags              JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status            VARCHAR NOT NULL DEFAULT 'DRAFT',
+    embedding_provider VARCHAR NOT NULL DEFAULT 'openai',
+    embedding_model   VARCHAR NOT NULL DEFAULT 'text-embedding-3-small',
+    chunk_size        INTEGER NOT NULL DEFAULT 1200,
+    chunk_overlap     INTEGER NOT NULL DEFAULT 150,
+    file_count        INTEGER NOT NULL DEFAULT 0,
+    chunk_count       INTEGER NOT NULL DEFAULT 0,
+    vector_count      INTEGER NOT NULL DEFAULT 0,
+    storage_bytes     BIGINT NOT NULL DEFAULT 0,
+    created_by        VARCHAR REFERENCES users(id) ON DELETE SET NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at        TIMESTAMPTZ
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_kb_workspace ON knowledge_bases (workspace_id) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_kb_status    ON knowledge_bases (workspace_id, status) WHERE deleted_at IS NULL`,
+
+  // -------- Knowledge Files --------
+  //  status: PENDING | EXTRACTING | CHUNKING | EMBEDDING | READY | ERROR
+  `CREATE TABLE IF NOT EXISTS knowledge_files (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    file_name         VARCHAR NOT NULL,
+    mime_type         VARCHAR NOT NULL,
+    file_size         BIGINT NOT NULL,
+    content_hash      VARCHAR NOT NULL,
+    status            VARCHAR NOT NULL DEFAULT 'PENDING',
+    error_message     TEXT,
+    extracted_text    TEXT,
+    chunk_count       INTEGER NOT NULL DEFAULT 0,
+    vector_count      INTEGER NOT NULL DEFAULT 0,
+    version           INTEGER NOT NULL DEFAULT 1,
+    uploaded_by       VARCHAR REFERENCES users(id) ON DELETE SET NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    indexed_at        TIMESTAMPTZ,
+    deleted_at        TIMESTAMPTZ
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_kf_kb ON knowledge_files (knowledge_base_id) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_kf_workspace_status ON knowledge_files (workspace_id, status) WHERE deleted_at IS NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_kf_content_hash ON knowledge_files (knowledge_base_id, content_hash) WHERE deleted_at IS NULL`,
+
+  // -------- Knowledge Chunks --------
+  // Embedding stored as real[] — portable across every Postgres install,
+  // no pgvector extension required. Cosine similarity is computed at query
+  // time (fine up to tens of thousands of chunks per query scope). Swap to
+  // pgvector later without changing the repository contract if scale demands.
+  `CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    file_id           UUID NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE,
+    chunk_index       INTEGER NOT NULL,
+    content           TEXT NOT NULL,
+    token_estimate    INTEGER NOT NULL DEFAULT 0,
+    embedding         REAL[],
+    embedding_model   VARCHAR NOT NULL,
+    embedding_dims    INTEGER NOT NULL,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_kc_kb          ON knowledge_chunks (knowledge_base_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_kc_workspace_kb ON knowledge_chunks (workspace_id, knowledge_base_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_kc_file_idx ON knowledge_chunks (file_id, chunk_index)`,
+
+  // -------- Signatures --------
+  `CREATE TABLE IF NOT EXISTS signatures (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id  VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name          VARCHAR NOT NULL,
+    role          VARCHAR,
+    title         VARCHAR,
+    company       VARCHAR,
+    website       VARCHAR,
+    phone         VARCHAR,
+    linkedin      VARCHAR,
+    address       TEXT,
+    logo_url      VARCHAR,
+    social_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    disclaimer    TEXT,
+    html_body     TEXT NOT NULL,
+    text_body     TEXT NOT NULL,
+    status        VARCHAR NOT NULL DEFAULT 'ACTIVE',
+    is_default    BOOLEAN NOT NULL DEFAULT FALSE,
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_by    VARCHAR REFERENCES users(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_signatures_workspace ON signatures (workspace_id) WHERE deleted_at IS NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_signatures_default ON signatures (workspace_id) WHERE is_default = TRUE AND deleted_at IS NULL`,
+
+  `CREATE TABLE IF NOT EXISTS signature_versions (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    signature_id  UUID NOT NULL REFERENCES signatures(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    payload       JSONB NOT NULL,
+    changed_by    VARCHAR,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_sig_versions ON signature_versions (signature_id, version)`,
+
+  // -------- Email Templates (Phase 6 enterprise version) --------
+  // Sits alongside the existing `templates` table (legacy quick-templates).
+  // Callers pick this one when a full HTML + variables + preview is needed.
+  `CREATE TABLE IF NOT EXISTS email_templates (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id  VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name          VARCHAR NOT NULL,
+    description   TEXT,
+    category      VARCHAR NOT NULL DEFAULT 'General',
+    tags          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    subject       TEXT NOT NULL,
+    html_body     TEXT NOT NULL,
+    text_body     TEXT NOT NULL,
+    mjml_source   TEXT,
+    variables     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status        VARCHAR NOT NULL DEFAULT 'ACTIVE',
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_by    VARCHAR REFERENCES users(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_email_templates_workspace ON email_templates (workspace_id) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_email_templates_category  ON email_templates (workspace_id, category) WHERE deleted_at IS NULL`,
+
+  `CREATE TABLE IF NOT EXISTS email_template_versions (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_id   UUID NOT NULL REFERENCES email_templates(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    payload       JSONB NOT NULL,
+    changed_by    VARCHAR,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_et_versions ON email_template_versions (template_id, version)`,
+
+  // -------- Prompt Library --------
+  `CREATE TABLE IF NOT EXISTS prompt_library (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id  VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name          VARCHAR NOT NULL,
+    description   TEXT,
+    category      VARCHAR NOT NULL DEFAULT 'General',
+    tags          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    system_prompt TEXT,
+    user_prompt   TEXT NOT NULL,
+    ai_model      VARCHAR,
+    temperature   REAL NOT NULL DEFAULT 0.7,
+    variables     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status        VARCHAR NOT NULL DEFAULT 'ACTIVE',
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_by    VARCHAR REFERENCES users(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_prompts_workspace ON prompt_library (workspace_id) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_prompts_category  ON prompt_library (workspace_id, category) WHERE deleted_at IS NULL`,
+
+  // -------- Campaign resource junction tables --------
+  // Kept as separate tables per resource type (rather than one polymorphic
+  // "campaign_resources" table) so foreign-key integrity is enforced by
+  // Postgres and JOINs stay simple.
+  `CREATE TABLE IF NOT EXISTS campaign_knowledge_bases (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id       VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    weight            REAL NOT NULL DEFAULT 1.0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_ckb ON campaign_knowledge_bases (campaign_id, knowledge_base_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_ckb_workspace ON campaign_knowledge_bases (workspace_id)`,
+
+  `CREATE TABLE IF NOT EXISTS campaign_email_templates (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id       VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    template_id       UUID NOT NULL REFERENCES email_templates(id) ON DELETE CASCADE,
+    step_index        INTEGER,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_cet ON campaign_email_templates (campaign_id, template_id, COALESCE(step_index, -1))`,
+
+  `CREATE TABLE IF NOT EXISTS campaign_signatures (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id       VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    signature_id      UUID NOT NULL REFERENCES signatures(id) ON DELETE CASCADE,
+    is_primary        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_cs ON campaign_signatures (campaign_id, signature_id)`,
+
+  `CREATE TABLE IF NOT EXISTS campaign_prompts (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id      VARCHAR NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    campaign_id       VARCHAR NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    prompt_id         UUID NOT NULL REFERENCES prompt_library(id) ON DELETE CASCADE,
+    step_index        INTEGER,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_cp ON campaign_prompts (campaign_id, prompt_id, COALESCE(step_index, -1))`,
+
+  // Campaigns get an explicit AI + embedding provider selection so the
+  // Resource Selector isn't just decoration. NULL means "workspace default".
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS ai_provider          VARCHAR`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS ai_model             VARCHAR`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS embedding_provider   VARCHAR`,
+  `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS embedding_model      VARCHAR`,
 ];
 
 export async function runMigrations(): Promise<void> {

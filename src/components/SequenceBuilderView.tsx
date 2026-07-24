@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import {
   campaignsApi, campaignAutomationApi, CampaignDashboardSummary, SequenceStepDto,
+  knowledgeApi, signaturesApi, emailTemplatesV2Api, promptsApi, campaignResourcesApi,
+  KnowledgeBaseDto, SignatureDto, EmailTemplateV2Dto, PromptDto, CampaignResourceSelectionDto,
 } from "../api/endpoints";
 import { Campaign, CampaignStatus } from "../types";
 import { useToast } from "../context/ToastContext";
@@ -219,7 +221,7 @@ export default function SequenceBuilderView({ campaigns, onRefresh }: Props) {
   const [steps, setSteps] = useState<SequenceStepDto[]>([]);
   const [dashboard, setDashboard] = useState<CampaignDashboardSummary | null>(null);
   const [dashboardAll, setDashboardAll] = useState<CampaignDashboardSummary[]>([]);
-  const [tab, setTab] = useState<"builder" | "timeline" | "queue" | "analytics" | "schedule">("builder");
+  const [tab, setTab] = useState<"builder" | "timeline" | "queue" | "analytics" | "schedule" | "resources">("builder");
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -408,7 +410,7 @@ export default function SequenceBuilderView({ campaigns, onRefresh }: Props) {
           </div>
 
           <div className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
-            {(["builder", "timeline", "schedule", "queue", "analytics"] as const).map((t) => (
+            {(["builder", "timeline", "schedule", "resources", "queue", "analytics"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -516,6 +518,7 @@ export default function SequenceBuilderView({ campaigns, onRefresh }: Props) {
           )}
 
           {tab === "analytics" && <AnalyticsPanel dashboard={dashboard} allCampaigns={dashboardAll} />}
+          {tab === "resources" && <ResourcesPanel campaignId={selectedCampaign.id} />}
         </>
       )}
     </div>
@@ -843,6 +846,268 @@ function AnalyticsPanel({
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// Phase 6: Campaign Resource Selector — Knowledge Bases, Templates,
+// Signatures, Prompts. All resources come from the Knowledge Center.
+// =============================================================================
+function ResourcesPanel({ campaignId }: { campaignId: string }) {
+  const toast = useToast();
+  const [selection, setSelection] = useState<CampaignResourceSelectionDto | null>(null);
+  const [kbs, setKbs] = useState<KnowledgeBaseDto[]>([]);
+  const [templates, setTemplates] = useState<EmailTemplateV2Dto[]>([]);
+  const [signatures, setSignatures] = useState<SignatureDto[]>([]);
+  const [prompts, setPrompts] = useState<PromptDto[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      const [sel, k, t, s, p] = await Promise.all([
+        campaignResourcesApi.get(campaignId),
+        knowledgeApi.listKbs(),
+        emailTemplatesV2Api.list(),
+        signaturesApi.list(),
+        promptsApi.list(),
+      ]);
+      setSelection(sel.selection);
+      setKbs(k.knowledgeBases);
+      setTemplates(t.templates);
+      setSignatures(s.signatures);
+      setPrompts(p.prompts);
+    } catch (err: any) { toast.error(err.message || String(err)); }
+  }, [campaignId, toast]);
+  useEffect(() => { load(); }, [load]);
+
+  if (!selection) {
+    return <div className="p-4 text-xs text-slate-500">Loading resources…</div>;
+  }
+
+  const toggleKb = (id: string) => {
+    setSelection({
+      ...selection,
+      knowledgeBaseIds: selection.knowledgeBaseIds.includes(id)
+        ? selection.knowledgeBaseIds.filter((x) => x !== id)
+        : [...selection.knowledgeBaseIds, id],
+    });
+  };
+  const toggleSig = (id: string) => {
+    setSelection({
+      ...selection,
+      signatureIds: selection.signatureIds.includes(id)
+        ? selection.signatureIds.filter((x) => x !== id)
+        : [...selection.signatureIds, id],
+    });
+  };
+  const setPrimarySig = (id: string) => setSelection({ ...selection, primarySignatureId: id });
+  const toggleTemplate = (id: string) => {
+    const has = selection.templateIds.find((t) => t.templateId === id);
+    setSelection({
+      ...selection,
+      templateIds: has
+        ? selection.templateIds.filter((t) => t.templateId !== id)
+        : [...selection.templateIds, { templateId: id, stepIndex: null }],
+    });
+  };
+  const togglePrompt = (id: string) => {
+    const has = selection.promptIds.find((p) => p.promptId === id);
+    setSelection({
+      ...selection,
+      promptIds: has
+        ? selection.promptIds.filter((p) => p.promptId !== id)
+        : [...selection.promptIds, { promptId: id, stepIndex: null }],
+    });
+  };
+
+  const save = async () => {
+    if (!selection) return;
+    setSaving(true);
+    try {
+      await Promise.all([
+        campaignResourcesApi.setKbs(campaignId, selection.knowledgeBaseIds),
+        campaignResourcesApi.setTemplates(campaignId, selection.templateIds),
+        campaignResourcesApi.setSignatures(campaignId, selection.signatureIds, selection.primarySignatureId),
+        campaignResourcesApi.setPrompts(campaignId, selection.promptIds),
+      ]);
+      toast.success("Resources saved.");
+      await load();
+    } catch (err: any) { toast.error(err.message || String(err)); }
+    finally { setSaving(false); }
+  };
+
+  const primaryId = selection.primarySignatureId;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-900/10 p-3 text-xs text-slate-700 dark:text-slate-300">
+        <b>How this works.</b> Every email in this campaign will be composed from these resources: the AI pulls facts from selected <b>Knowledge Bases</b>, applies the selected <b>Prompt</b>, renders through the selected <b>Template</b>, and appends the primary <b>Signature</b>. Create resources in <b>Knowledge Center</b>.
+      </div>
+
+      <ResourceSection<KnowledgeBaseDto>
+        icon="📚"
+        title="Knowledge Bases"
+        subtitle="RAG facts. AI never invents beyond what's here."
+        empty="No KBs yet — create one in Knowledge Center."
+        items={kbs}
+        renderItem={(kb) => (
+          <button
+            key={kb.id}
+            type="button"
+            onClick={() => toggleKb(kb.id)}
+            className={`p-3 rounded-lg border text-left w-full ${
+              selection.knowledgeBaseIds.includes(kb.id)
+                ? "border-blue-500 bg-blue-50 dark:bg-slate-800"
+                : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-blue-300"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">{kb.name}</span>
+              {selection.knowledgeBaseIds.includes(kb.id) && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-blue-500 text-white">SELECTED</span>}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1">
+              {kb.fileCount} files · {kb.vectorCount} vectors · {kb.embeddingProvider}:{kb.embeddingModel}
+            </div>
+          </button>
+        )}
+      />
+
+      <ResourceSection<EmailTemplateV2Dto>
+        icon="✉️"
+        title="Email Templates"
+        subtitle="If none selected, the AI writes free-form using the prompt + KB context."
+        empty="No templates yet — create one in Knowledge Center."
+        items={templates}
+        renderItem={(t) => {
+          const isOn = selection.templateIds.some((x) => x.templateId === t.id);
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => toggleTemplate(t.id)}
+              className={`p-3 rounded-lg border text-left w-full ${
+                isOn
+                  ? "border-blue-500 bg-blue-50 dark:bg-slate-800"
+                  : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-blue-300"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium truncate">{t.name}</span>
+                {isOn && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-blue-500 text-white">SELECTED</span>}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1 truncate">{t.category} · {t.subject}</div>
+            </button>
+          );
+        }}
+      />
+
+      <ResourceSection<SignatureDto>
+        icon="✍️"
+        title="Signatures"
+        subtitle="Primary signature is appended to every email in this campaign."
+        empty="No signatures yet — create one in Knowledge Center."
+        items={signatures}
+        renderItem={(s) => {
+          const isOn = selection.signatureIds.includes(s.id);
+          const isPrimary = primaryId === s.id;
+          return (
+            <div
+              key={s.id}
+              className={`p-3 rounded-lg border ${
+                isOn ? "border-blue-500 bg-blue-50 dark:bg-slate-800" : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium flex items-center gap-2 flex-1 cursor-pointer">
+                  <input type="checkbox" checked={isOn} onChange={() => toggleSig(s.id)} />
+                  <span className="truncate">{s.name}</span>
+                  {s.isDefault && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 rounded">WS DEFAULT</span>}
+                </label>
+                {isOn && (
+                  <label className="text-[10px] font-mono flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" checked={isPrimary} onChange={() => setPrimarySig(s.id)} />
+                    Primary
+                  </label>
+                )}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1 truncate">{s.role || s.title || "—"}</div>
+            </div>
+          );
+        }}
+      />
+
+      <ResourceSection<PromptDto>
+        icon="🧠"
+        title="Prompt Library"
+        subtitle="Shapes tone + style. Optional — the AI has sensible defaults."
+        empty="No prompts yet — create one in Knowledge Center."
+        items={prompts}
+        renderItem={(p) => {
+          const isOn = selection.promptIds.some((x) => x.promptId === p.id);
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => togglePrompt(p.id)}
+              className={`p-3 rounded-lg border text-left w-full ${
+                isOn
+                  ? "border-blue-500 bg-blue-50 dark:bg-slate-800"
+                  : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-blue-300"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium truncate">{p.name}</span>
+                {isOn && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-blue-500 text-white">SELECTED</span>}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1 truncate">{p.category} · temp {p.temperature}</div>
+            </button>
+          );
+        }}
+      />
+
+      <div className="flex justify-end">
+        <button
+          onClick={save}
+          disabled={saving}
+          className="flex items-center gap-2 px-5 py-2 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-60 text-sm"
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          Save resources
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ResourceSection<T extends { id: string }>({
+  icon, title, subtitle, empty, items, renderItem,
+}: {
+  icon: string;
+  title: string;
+  subtitle: string;
+  empty: string;
+  items: T[];
+  renderItem: (t: T) => React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-lg">{icon}</span>
+        <div>
+          <h4 className="text-sm font-semibold">{title}</h4>
+          <p className="text-[11px] text-slate-500">{subtitle}</p>
+        </div>
+      </div>
+      {items.length === 0 ? (
+        <div className="text-xs text-slate-500 p-4 border border-dashed border-slate-300 dark:border-slate-700 rounded-md text-center">
+          {empty}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {items.map(renderItem)}
         </div>
       )}
     </div>

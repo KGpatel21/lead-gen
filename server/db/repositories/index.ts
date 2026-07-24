@@ -50,6 +50,22 @@ export type { FollowUpRule } from "./followUp.repository";
 export { templateVersionRepository } from "./templateVersion.repository";
 export type { TemplateVersion } from "./templateVersion.repository";
 
+// Phase 6: Knowledge Center — KBs, signatures, templates, prompts, resources
+export { knowledgeBaseRepository } from "./knowledgeBase.repository";
+export type { KnowledgeBase, KbStatus, CreateKnowledgeBaseInput, KnowledgeBasePatch } from "./knowledgeBase.repository";
+export { knowledgeFileRepository } from "./knowledgeFile.repository";
+export type { KnowledgeFile, KnowledgeFileStatus } from "./knowledgeFile.repository";
+export { knowledgeChunkRepository } from "./knowledgeChunk.repository";
+export type { KnowledgeChunk, KnowledgeChunkHit } from "./knowledgeChunk.repository";
+export { signatureRepository } from "./signature.repository";
+export type { Signature, SignatureStatus, CreateSignatureInput } from "./signature.repository";
+export { emailTemplateV2Repository } from "./emailTemplateV2.repository";
+export type { EmailTemplateV2, EmailTemplateStatus, CreateEmailTemplateInput } from "./emailTemplateV2.repository";
+export { promptRepository } from "./prompt.repository";
+export type { PromptEntry, PromptStatus, CreatePromptInput } from "./prompt.repository";
+export { campaignResourceRepository } from "./campaignResource.repository";
+export type { CampaignResourceSelection } from "./campaignResource.repository";
+
 // Phase 5: campaign automation engine
 export { sequenceStepRepository } from "./sequenceStep.repository";
 export type {

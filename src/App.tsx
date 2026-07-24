@@ -20,6 +20,7 @@ import CrmBoardView from "./components/CrmBoardView";
 import EnterpriseConsole from "./components/EnterpriseConsole";
 import LeadDiscoveryView from "./components/LeadDiscoveryView";
 import SequenceBuilderView from "./components/SequenceBuilderView";
+import KnowledgeCenterView from "./components/KnowledgeCenterView";
 import LoginPage from "./components/LoginPage";
 
 import {
@@ -305,6 +306,8 @@ function AuthedApp() {
         );
       case "sequences":
         return <SequenceBuilderView campaigns={campaigns} onRefresh={fetchAllSaaSData} />;
+      case "knowledge":
+        return <KnowledgeCenterView />;
       case "smtp":
         return (
           <InboxesView

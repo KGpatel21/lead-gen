@@ -311,6 +311,207 @@ export const campaignAutomationApi = {
   },
 };
 
+// ---- Knowledge Center (Phase 6) ----
+export interface KnowledgeBaseDto {
+  id: string;
+  name: string;
+  description?: string;
+  tags: string[];
+  status: "DRAFT" | "INDEXING" | "READY" | "ERROR" | "ARCHIVED";
+  embeddingProvider: string;
+  embeddingModel: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  fileCount: number;
+  chunkCount: number;
+  vectorCount: number;
+  storageBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface KnowledgeFileDto {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  status: "PENDING" | "EXTRACTING" | "CHUNKING" | "EMBEDDING" | "READY" | "ERROR";
+  errorMessage?: string;
+  chunkCount: number;
+  vectorCount: number;
+  createdAt: string;
+  indexedAt?: string;
+}
+export interface SignatureDto {
+  id: string;
+  name: string;
+  role?: string;
+  title?: string;
+  company?: string;
+  website?: string;
+  phone?: string;
+  linkedin?: string;
+  address?: string;
+  logoUrl?: string;
+  social: Record<string, string>;
+  disclaimer?: string;
+  htmlBody: string;
+  textBody: string;
+  status: "ACTIVE" | "ARCHIVED";
+  isDefault: boolean;
+  version: number;
+  updatedAt: string;
+}
+export interface EmailTemplateV2Dto {
+  id: string;
+  name: string;
+  description?: string;
+  category: string;
+  tags: string[];
+  subject: string;
+  htmlBody: string;
+  textBody: string;
+  mjmlSource?: string;
+  variables: string[];
+  status: "ACTIVE" | "ARCHIVED";
+  version: number;
+  updatedAt: string;
+}
+export interface PromptDto {
+  id: string;
+  name: string;
+  description?: string;
+  category: string;
+  tags: string[];
+  systemPrompt?: string;
+  userPrompt: string;
+  aiModel?: string;
+  temperature: number;
+  variables: string[];
+  status: "ACTIVE" | "ARCHIVED";
+  version: number;
+  updatedAt: string;
+}
+export interface CampaignResourceSelectionDto {
+  knowledgeBaseIds: string[];
+  templateIds: Array<{ templateId: string; stepIndex: number | null }>;
+  signatureIds: string[];
+  primarySignatureId: string | null;
+  promptIds: Array<{ promptId: string; stepIndex: number | null }>;
+}
+
+export const knowledgeApi = {
+  providers() {
+    return api.raw<{ success: boolean; providers: Array<{ kind: string; defaultModel: string; configured: boolean }> }>(
+      "GET", "/api/knowledge/providers/embedding"
+    );
+  },
+  // Knowledge Bases
+  listKbs() {
+    return api.raw<{ success: boolean; knowledgeBases: KnowledgeBaseDto[] }>("GET", "/api/knowledge-bases");
+  },
+  createKb(body: Partial<KnowledgeBaseDto> & { name: string; embeddingProvider?: string }) {
+    return api.raw<{ success: boolean; knowledgeBase: KnowledgeBaseDto }>("POST", "/api/knowledge-bases", body);
+  },
+  updateKb(id: string, patch: Partial<KnowledgeBaseDto>) {
+    return api.raw<{ success: boolean; knowledgeBase: KnowledgeBaseDto }>("PUT", `/api/knowledge-bases/${id}`, patch);
+  },
+  deleteKb(id: string) {
+    return api.raw<{ success: boolean }>("DELETE", `/api/knowledge-bases/${id}`);
+  },
+  listFiles(kbId: string) {
+    return api.raw<{ success: boolean; files: KnowledgeFileDto[] }>("GET", `/api/knowledge-bases/${kbId}/files`);
+  },
+  async uploadFiles(kbId: string, files: File[]) {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f, f.name);
+    const token = session.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const resp = await window.fetch(`/api/knowledge-bases/${kbId}/files`, { method: "POST", body: fd, headers });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json?.error || `upload failed (HTTP ${resp.status})`);
+    return json as { success: boolean; uploads: Array<{ fileName: string; status: string; chunks: number; vectors: number; errorMessage?: string }>; knowledgeBase: KnowledgeBaseDto };
+  },
+  deleteFile(kbId: string, fileId: string) {
+    return api.raw<{ success: boolean }>("DELETE", `/api/knowledge-bases/${kbId}/files/${fileId}`);
+  },
+  search(kbId: string, query: string, topK = 6) {
+    return api.raw<{ success: boolean; hits: Array<{ score: number; content: string; fileName?: string; kbName?: string }>; context: string }>(
+      "POST", `/api/knowledge-bases/${kbId}/search`, { query, topK }
+    );
+  },
+  adminDashboard() {
+    return api.raw<{ success: boolean; stats: Record<string, unknown> }>("GET", "/api/knowledge/admin/dashboard");
+  },
+};
+
+export const signaturesApi = {
+  list() { return api.raw<{ success: boolean; signatures: SignatureDto[] }>("GET", "/api/signatures"); },
+  create(body: Partial<SignatureDto> & { name: string; htmlBody: string; textBody: string }) {
+    return api.raw<{ success: boolean; signature: SignatureDto }>("POST", "/api/signatures", body);
+  },
+  update(id: string, patch: Partial<SignatureDto>) {
+    return api.raw<{ success: boolean; signature: SignatureDto }>("PUT", `/api/signatures/${id}`, patch);
+  },
+  del(id: string) { return api.raw<{ success: boolean }>("DELETE", `/api/signatures/${id}`); },
+};
+
+export const emailTemplatesV2Api = {
+  list(category?: string) {
+    const qs = category ? `?category=${encodeURIComponent(category)}` : "";
+    return api.raw<{ success: boolean; templates: EmailTemplateV2Dto[] }>("GET", `/api/email-templates${qs}`);
+  },
+  create(body: Partial<EmailTemplateV2Dto> & { name: string; subject: string; htmlBody: string; textBody: string }) {
+    return api.raw<{ success: boolean; template: EmailTemplateV2Dto }>("POST", "/api/email-templates", body);
+  },
+  update(id: string, patch: Partial<EmailTemplateV2Dto>) {
+    return api.raw<{ success: boolean; template: EmailTemplateV2Dto }>("PUT", `/api/email-templates/${id}`, patch);
+  },
+  duplicate(id: string, name?: string) {
+    return api.raw<{ success: boolean; template: EmailTemplateV2Dto }>("POST", `/api/email-templates/${id}/duplicate`, { name });
+  },
+  del(id: string) { return api.raw<{ success: boolean }>("DELETE", `/api/email-templates/${id}`); },
+  preview(id: string, vars: Record<string, string>) {
+    return api.raw<{ success: boolean; preview: { subject: string; html: string; text: string } }>(
+      "POST", `/api/email-templates/${id}/preview`, { vars }
+    );
+  },
+};
+
+export const promptsApi = {
+  list() { return api.raw<{ success: boolean; prompts: PromptDto[] }>("GET", "/api/prompts"); },
+  create(body: Partial<PromptDto> & { name: string; userPrompt: string }) {
+    return api.raw<{ success: boolean; prompt: PromptDto }>("POST", "/api/prompts", body);
+  },
+  update(id: string, patch: Partial<PromptDto>) {
+    return api.raw<{ success: boolean; prompt: PromptDto }>("PUT", `/api/prompts/${id}`, patch);
+  },
+  duplicate(id: string, name?: string) {
+    return api.raw<{ success: boolean; prompt: PromptDto }>("POST", `/api/prompts/${id}/duplicate`, { name });
+  },
+  del(id: string) { return api.raw<{ success: boolean }>("DELETE", `/api/prompts/${id}`); },
+};
+
+export const campaignResourcesApi = {
+  get(campaignId: string) {
+    return api.raw<{ success: boolean; selection: CampaignResourceSelectionDto }>("GET", `/api/campaigns/${campaignId}/resources`);
+  },
+  setKbs(campaignId: string, ids: string[]) {
+    return api.raw<{ success: boolean }>("PUT", `/api/campaigns/${campaignId}/resources/knowledge-bases`, { knowledgeBaseIds: ids });
+  },
+  setTemplates(campaignId: string, entries: Array<{ templateId: string; stepIndex: number | null }>) {
+    return api.raw<{ success: boolean }>("PUT", `/api/campaigns/${campaignId}/resources/templates`, { templates: entries });
+  },
+  setSignatures(campaignId: string, ids: string[], primaryId: string | null) {
+    return api.raw<{ success: boolean }>("PUT", `/api/campaigns/${campaignId}/resources/signatures`, {
+      signatureIds: ids, primarySignatureId: primaryId,
+    });
+  },
+  setPrompts(campaignId: string, entries: Array<{ promptId: string; stepIndex: number | null }>) {
+    return api.raw<{ success: boolean }>("PUT", `/api/campaigns/${campaignId}/resources/prompts`, { prompts: entries });
+  },
+};
+
 // ---- Automation / Autopilot ----
 export const automationApi = {
   trigger(task: string, campaignId?: string): Promise<any> {
