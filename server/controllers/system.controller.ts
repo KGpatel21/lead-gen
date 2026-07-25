@@ -24,11 +24,13 @@ import { CampaignStatus, ReplySentiment } from "../../src/types";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
 
 export class SystemController {
-  public static async getDashboardStats(_req: Request, res: Response): Promise<void> {
+  public static async getDashboardStats(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const ws = (req as any).workspaceId as string | undefined;
+    if (!ws) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
     const [campaigns, activeSmtps, activeDomains] = await Promise.all([
-      campaignRepository.list(),
-      smtpRepository.list(),
-      domainRepository.list(),
+      campaignRepository.list(ws),
+      smtpRepository.list(ws),
+      domainRepository.list(ws),
     ]);
 
     const totalSent = campaigns.reduce((s, c) => s + c.sentCount, 0);
@@ -68,7 +70,7 @@ export class SystemController {
     const domainReputationTrend = sentOverTime.map((row) => ({ date: row.date, avgScore: avgDomainHealth }));
     const warmupTrend = sentOverTime.map((row) => ({ date: row.date, sent: 0, recovered: 0 }));
 
-    const sentimentCounts = await replyRepository.recentSentimentCounts();
+    const sentimentCounts = await replyRepository.recentSentimentCounts(ws);
     const repliesSentimentBreakdown = [
       { name: "Interested",       value: sentimentCounts[ReplySentiment.INTERESTED]     || 0, color: "#10B981" },
       { name: "Not Interested",   value: sentimentCounts[ReplySentiment.NOT_INTERESTED] || 0, color: "#9CA3AF" },
@@ -76,7 +78,7 @@ export class SystemController {
       { name: "Spam",             value: sentimentCounts[ReplySentiment.SPAM]           || 0, color: "#EF4444" },
     ];
 
-    const recent = (await replyRepository.list()).slice(0, 5);
+    const recent = (await replyRepository.list(ws)).slice(0, 5);
 
     res.json({
       totalSent,
@@ -111,29 +113,27 @@ export class SystemController {
     res.json({ success: true, message: "Database wiped." });
   }
 
-  public static async getReplies(_req: Request, res: Response): Promise<void> {
-    const data = await replyRepository.list();
+  public static async getReplies(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const data = await replyRepository.list(req.workspaceId);
     res.json({ success: true, data });
   }
 
-  public static async readReply(req: Request, res: Response): Promise<void> {
-    await replyRepository.markRead(req.params.id);
-    const r = await replyRepository.findById(req.params.id);
-    if (!r) {
-      res.status(404).json({ success: false, error: "Reply not found." });
-      return;
-    }
+  public static async readReply(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const ok = await replyRepository.markRead(req.params.id, req.workspaceId);
+    if (!ok) { res.status(404).json({ success: false, error: "Reply not found." }); return; }
+    const r = await replyRepository.findById(req.params.id, req.workspaceId);
+    if (!r) { res.status(404).json({ success: false, error: "Reply not found." }); return; }
     res.json({ success: true, reply: r });
   }
 
-  public static async sendReplyMessage(req: Request, res: Response): Promise<void> {
+  public static async sendReplyMessage(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
     const { messageText } = req.body;
     if (typeof messageText !== "string" || messageText.trim() === "") {
       res.status(400).json({ success: false, error: "messageText is required." });
       return;
     }
-    const reply = await replyRepository.findById(id);
+    const reply = await replyRepository.findById(id, req.workspaceId);
     if (!reply) {
       res.status(404).json({ success: false, error: "Reply not found." });
       return;
@@ -146,8 +146,8 @@ export class SystemController {
     res.json({ success: true, message: "Response recorded. Outbound send will ship in Phase 2 (IMAP threading)." });
   }
 
-  public static async generateAiReply(req: Request, res: Response): Promise<void> {
-    const reply = await replyRepository.findById(req.params.id);
+  public static async generateAiReply(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reply = await replyRepository.findById(req.params.id, req.workspaceId);
     if (!reply) {
       res.status(404).json({ success: false, error: "Reply not found." });
       return;

@@ -1,365 +1,445 @@
 # Outbound.AI — How to Use
 
-Welcome. This guide shows you how to go from a fresh account to booked meetings, in the shortest path possible.
+Complete step-by-step guide for using the portal. Written for founders, sales, and marketing — no coding required.
 
-Written for the person actually running the outreach — no engineer required.
+> If you're deploying the app, open `README.md` instead. If you want a compact feature reference, open `USER_GUIDE.md`.
 
 ---
 
 ## Table of Contents
 
-1. [What you get](#1-what-you-get)
-2. [Your first 5 minutes — send your first email](#2-your-first-5-minutes--send-your-first-email)
-3. [Your first 30 minutes — a working campaign](#3-your-first-30-minutes--a-working-campaign)
-4. [Your first week — dial in what works](#4-your-first-week--dial-in-what-works)
-5. [The 8 things every screen does](#5-the-8-things-every-screen-does)
-6. [How to write cold emails that get replies](#6-how-to-write-cold-emails-that-get-replies)
-7. [Deliverability — how to stay out of spam](#7-deliverability--how-to-stay-out-of-spam)
-8. [Best practices that separate 1% reply rate from 10%](#8-best-practices-that-separate-1-reply-rate-from-10)
-9. [Team collaboration](#9-team-collaboration)
-10. [Frequently asked questions](#10-frequently-asked-questions)
-11. [Need help?](#11-need-help)
+1. [What this portal does](#1-what-this-portal-does)
+2. [The 4 ways you can use Outbound.AI](#2-the-4-ways-you-can-use-outboundai)
+3. [Your first 5 minutes — send your first email](#3-your-first-5-minutes--send-your-first-email)
+4. [Full step-by-step — from zero to running campaign](#4-full-step-by-step--from-zero-to-running-campaign)
+5. [Using Knowledge Bases (RAG) — the killer feature](#5-using-knowledge-bases-rag--the-killer-feature)
+6. [How the email you send looks (the new design)](#6-how-the-email-you-send-looks-the-new-design)
+7. [Reading + replying to incoming mail](#7-reading--replying-to-incoming-mail)
+8. [Analytics + tracking what worked](#8-analytics--tracking-what-worked)
+9. [Team, roles, and access](#9-team-roles-and-access)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Glossary — plain English](#11-glossary--plain-english)
 
 ---
 
-## 1. What you get
+## 1. What this portal does
 
-Outbound.AI is your all-in-one cold-email workspace. In plain terms:
+You have a product or service. You want to reach cold prospects and book meetings. Outbound.AI is the whole system:
 
-**Find** — Search Google Maps for real businesses in a niche + city. Or ask AI to build a lead list on any platform. Or upload your own CSV.
+- **Find** — Google Maps businesses, LinkedIn-style AI prospecting, or your own CSV.
+- **Understand** — Uploads your case studies, pricing, services, portfolio into Knowledge Bases so the AI *knows* what you sell before writing anything.
+- **Write** — AI drafts a personalized first email for every prospect using **facts** from your Knowledge Base + facts scraped from the prospect's own website.
+- **Send** — From your own Gmail, Outlook, Amazon SES, or any SMTP inbox.
+- **Follow up** — Automatic multi-step sequences. Stops the moment someone replies.
+- **Track** — Opens, clicks, replies (auto-categorized into 9 buckets), bounces, meetings.
+- **Reply** — Everything lands in one inbox; AI drafts your response.
 
-**Write** — AI reads each prospect's website and drafts a personalized email using real facts about their business. No mail merge. No `{{firstName}}` gimmicks — actual specifics.
-
-**Send** — From your own Gmail, Outlook, or any email account you connect. Automatic timezone-aware scheduling. Never fires on weekends or evenings unless you want it to.
-
-**Follow up** — Set up a 3-, 5-, or 10-step sequence once. The system handles the rest — different message each time, stops the moment someone replies.
-
-**Track** — Live dashboard shows opens, replies, meetings, and bounces. AI reads every reply and tags it (Interested / Meeting Requested / Not Interested / etc.).
-
-**Reply** — Every response lands in one inbox, categorized. AI drafts a suggested response you can edit and send in two clicks.
-
-The whole thing runs on your infrastructure and your email accounts. Your data never leaves your workspace.
+All isolated per workspace. Your data never mixes with anyone else's.
 
 ---
 
-## 2. Your first 5 minutes — send your first email
+## 2. The 4 ways you can use Outbound.AI
 
-Goal: your first real cold email goes out in under 5 minutes. Follow these exactly.
+| # | You want to… | Use this flow | Time to first email |
+|---|---|---|---|
+| A | **Try it in 5 minutes** — send one real email to yourself or a friend | Add Gmail → Lead Discovery → Add to campaign → Sequence Builder → Enroll → Play | ~5 min |
+| B | **Run a proper campaign** — 50-500 leads, tight targeting, follow-ups | Add Gmail + verify domain → Upload leads or use Lead Discovery → Create campaign → Assign Knowledge Bases + Signature + Template → Build 3-step sequence → Enroll → Play | ~30 min |
+| C | **Scale to thousands** — multiple inboxes, sender pools, high volume | Add 5+ inboxes → Create Sender Pool → Verify domain → Upload big CSV → Assign KB + prompt → Longer sequence → Enroll → Play. **The system rotates automatically.** | ~1 hour setup, then autopilot |
+| D | **Just draft one email** — no sending, get an AI-drafted email you can copy/paste | Sequence Builder → Preview Next → Copy the output. Great for hand-crafted outreach. | ~1 min |
+
+You can also **combine** flows — e.g. use Discovery to build a list of 50 leads, then run flow B on those.
+
+---
+
+## 3. Your first 5 minutes — send your first email
+
+Goal: your first real email goes out in under 5 minutes.
 
 ### Minute 1 — Sign in
 
-Open the URL your team sent you. Click **Register**. Enter name, email, password. You're in.
+- Open the URL your admin gave you.
+- Click **Register**. Only whitelisted emails may register — if yours isn't on the list, you'll see:
+  > *Only whitelisted users are allowed to register. Please contact the administrator.*
+- If you're whitelisted, register normally. A brand-new workspace is created just for you.
 
-### Minute 2 — Connect your Gmail
+### Minute 2 — Connect Gmail
 
-1. Sidebar → **SMTP Accounts Router** → **+ Add**.
-2. Fill in your Gmail address. Everything else is pre-filled.
-3. For **SMTP Password**, you need a Gmail App Password. Open [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) in a new tab, type `Outbound.AI`, click **Create**. Copy the 16-character password.
-4. Paste it. Click **Save**. Click **Test Connection** — you should see a green checkmark.
+- Sidebar → **SMTP Accounts Router** → **+ Add**.
+- Email = your Gmail. SMTP Host + Port pre-filled.
+- **Password field**: paste a Gmail App Password, not your normal password. Get one from [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (2 min setup, needs 2-step verification).
+- **Save**. Click **Test Connection** — green tick means you're wired.
 
-Using Outlook, Zoho, or something else? Same idea, just different SMTP host. Zoho = `smtp.zoho.com`, Outlook = `smtp-mail.outlook.com`. Your provider's docs will tell you.
+Outlook / Zoho / Titan / any SMTP works the same — just different host + port.
 
 ### Minute 3 — Find a lead
 
-1. Sidebar → **Lead Discovery**.
-2. Type a search: `dental clinics in Austin`, or `roofing companies in Miami`, or whatever your niche is.
-3. Click **Search**. Real businesses appear with names, websites, phones, ratings.
-4. Pick one that looks interesting. Tick the box. Click **Analyze Selected**.
-5. The AI visits their website. In a few seconds, you have a fact sheet on them.
+- Sidebar → **Lead Discovery**.
+- Search e.g. `dental clinics in Austin`.
+- Tick one interesting result. Click **Analyze Selected**. Wait a few seconds — the AI reads their website.
 
-### Minute 4 — Create a campaign and add the lead
+### Minute 4 — Create campaign + add the lead
 
-1. Sidebar → **Outreach Campaigns** → **+ New Campaign**.
-2. Name it something clear like `Austin Dental Test`.
-3. Click **Create**.
-4. Open the campaign. On the Leads tab, either add the lead you just analyzed, or click **From Discovery** to import the ones you selected.
+- Sidebar → **Outreach Campaigns** → **+ New Campaign**.
+- Give it a clear name (`Austin Dental Test`).
+- Open it → Leads tab → **From Discovery** (or manually enter one).
 
 ### Minute 5 — Send
 
-1. Sidebar → **Sequence Builder** → pick your campaign.
-2. You'll see a starter sequence (a first email + one follow-up). Leave it as-is.
-3. Click **Enroll all leads**.
-4. Click **Resume** or the ▶ Play button.
+- Sidebar → **Sequence Builder** → pick your campaign.
+- Two starter steps are pre-loaded. Leave them.
+- Click **Enroll all leads** → ▶ **Play**.
 
-Your first email is scheduled. Depending on the time (business hours, weekday), it may fire immediately or wait until 9 AM tomorrow.
+Your first email is queued. Check the **Queue** tab — counter should be moving.
 
-**Check it worked**: Sidebar → **Sequence Builder** → **Queue** tab. You should see the counters updating.
+That's it. First cold email out via Outbound.AI.
 
 ---
 
-## 3. Your first 30 minutes — a working campaign
+## 4. Full step-by-step — from zero to running campaign
 
-Now that you've sent one, let's make it a real campaign.
+For anyone doing it properly. ~30-60 minutes end-to-end.
 
-### Add 20+ leads
+### Step 1 — Verify your sending domain (10 min, one-time)
 
-Cold email is a numbers game — 1–3% reply rate on the first email is normal. To book one meeting, you need 30–50 leads minimum.
+- Sidebar → **DNS & Verified Domains** → **+ Add Domain**.
+- Enter the domain part of your email (`yourcompany.com`).
+- Copy the three DNS records (SPF, DKIM, DMARC) and paste them into your registrar's DNS panel (GoDaddy, Cloudflare, Route53, Namecheap, etc.).
+- Come back and click **Verify Domain**. All three should turn green in under 10 minutes.
 
-Three ways to bulk-add:
+**Why it matters**: emails from an unverified domain go to spam. This is the single biggest deliverability lever.
 
-1. **Lead Discovery** — search again, tick 20 businesses, hit **Analyze** and **Push to campaign**.
-2. **CSV upload** — Campaigns → Leads tab → **Upload CSV**. Paste a CSV with an `email` column (plus optional `firstName`, `lastName`, `company`).
-3. **AI Lead Finder** — Sidebar → **AI Lead Finder** → describe your ideal customer → AI returns 20 leads at a time.
+### Step 2 — Connect one or more sending inboxes
 
-### Set your schedule
+- Sidebar → **SMTP Accounts Router** → **+ Add**.
+- Recommended defaults: `Daily limit = 50` for the first 2 weeks. Warmup **ON**.
+- For scale, add multiple inboxes (`sales@`, `hello@`, `krutarth@`). The system will rotate automatically.
 
-Sequence Builder → your campaign → **Schedule** tab.
+### Step 3 — Build your Knowledge Base (10 min, huge payoff)
 
-- **Working days**: Mon–Fri (unless your industry is different).
-- **Send window**: 9 AM to 5 PM in your prospect's timezone.
-- **Timezone**: `America/New_York`, `Europe/London`, etc. Prospect timezone gives you the highest open rates.
-- **Max per hour / per day**: leave at 60/500 unless you know what you're doing.
-- **Gap between sends**: 30–180 seconds. Adds human-like randomness.
-- **Goal** (one sentence): `Book a 15-min call to discuss switching from their current tool to ours.` The AI reads this and shapes messages around it.
+This is what makes the AI actually good. Skip it and you get generic emails. Do it and you get emails that reference your real case studies, pricing, product features.
 
-### Build a proper sequence
+- Sidebar → **Knowledge Center** → **Knowledge Bases** tab → **+ New**.
+- Create one KB per topic. Common setups:
+  - **Company Profile** — your one-pager, About-Us, elevator pitch.
+  - **Pricing** — your pricing PDF or a text file with tier details.
+  - **Case Studies** — customer success stories (PDFs from your marketing site work great).
+  - **Portfolio** — sample work, deliverables.
+  - **AI Services / Manufacturing / whatever verticals you sell to** — one KB per vertical.
+- Upload files. Supported: **PDF, DOCX, TXT, MD, CSV, HTML**.
+- The system extracts text → chunks it → generates embeddings → stores vectors. Watch each file's status pill:
+  - `PENDING` → `EXTRACTING` → `CHUNKING` → `EMBEDDING` → `READY` (green) ✅
+- Use the **test-search widget** at the bottom of each KB to sanity-check retrieval. Ask "what does the product do?" and you should see chunks from your Company Profile come up first.
 
-Sequence Builder → **Builder** tab. Delete the starter steps and build these:
+### Step 4 — Create a signature
 
-| Step | Delay | Mode | Purpose |
+- Sidebar → **Knowledge Center** → **Signatures** tab → **+ New**.
+- Fill in your name, title, company, phone, LinkedIn.
+- Provide both `HTML body` (rich) AND `Plain-text body` (fallback). The system uses HTML in email clients that support it, text elsewhere.
+- Tick **"Use as workspace default signature"** to auto-apply everywhere.
+
+### Step 5 — Create an email template (optional)
+
+- Sidebar → **Knowledge Center** → **Email Templates** tab → **+ New**.
+- Set subject + HTML + text. Use variables:
+  - `{{firstName}}` `{{lastName}}` `{{company}}` `{{industry}}` `{{city}}`
+  - `{{personalizedLine}}` — auto-generated per-recipient personalization
+  - `{{signature}}` — your signature (auto)
+  - `{{unsubscribe}}` — CAN-SPAM unsub link (auto)
+
+Skip this if you want the AI to write from scratch every time (that's usually higher-performing).
+
+### Step 6 — Create prompts (optional)
+
+- Sidebar → **Knowledge Center** → **Prompt Library** tab → **+ New**.
+- Example prompt: *"Write a punchy 90-word cold email. Reference one specific fact about the prospect's business. Single CTA to book a 15-min call. Tone: consultative, not salesy."*
+- Save it. You'll pick this prompt per-campaign later.
+
+### Step 7 — Find leads
+
+Three ways:
+
+**Google Maps**: Sidebar → **Lead Discovery** → search → tick businesses → **Analyze Selected**.
+
+**AI Lead Finder**: Sidebar → **AI Lead Finder** → topic + platform + count → AI returns leads.
+
+**CSV upload**: campaign → Leads tab → **Upload CSV**. Minimum column: `email`. Optional: `firstName`, `lastName`, `company`, `personalizedLine`.
+
+### Step 8 — Create a campaign
+
+- Sidebar → **Outreach Campaigns** → **+ New Campaign**.
+- Name it clearly (e.g. `Q3 SaaS Founders — US`).
+
+Then open the campaign → **Sequence Builder** and configure it:
+
+**Schedule tab** — set the calendar rules:
+- Working days: Mon–Fri.
+- Send window: 09:00–17:00 in the **prospect's** timezone.
+- Timezone: `America/New_York` (or wherever your leads are).
+- Max/hour: 30–60. Max/day: 200–500.
+- Gap between sends: 30–180 seconds (random, human-like).
+- **Goal** (one sentence): *"Book a 15-min discovery call to demo our AI outbound platform."*
+
+### Step 9 — Assign resources (this is where Knowledge Bases plug in)
+
+- Same campaign → Sequence Builder → **Resources** tab.
+- **Knowledge Bases**: tick the ones the AI should draw from. Recommended for most campaigns: *Company Profile + Pricing + Case Studies + your vertical-specific KB*. Multiple is fine — the AI blends them.
+- **Email Templates**: pick one to enforce structure, or leave blank for the AI to write free-form.
+- **Signatures**: tick which signatures may be used. Choose **one primary** — that's what gets appended.
+- **Prompt Library**: pick one prompt to shape tone/style.
+
+Click **Save resources**.
+
+### Step 10 — Build the sequence
+
+- Same campaign → Sequence Builder → **Builder** tab.
+- Delete the starter steps.
+- Add these 4:
+
+| Step | Delay | Mode | AI instruction |
 |---|---|---|---|
 | 0 | now | AI | The opener — reference something specific about them. |
-| 1 | 3 days | AI | Short bump. New angle. |
-| 2 | 7 days | AI | Case study or example. One clear ask. |
-| 3 | 12 days | AI | Polite break-up — "should I close the loop?" |
+| 1 | 72 hours | AI | Short bump. New angle. No repetition of Step 0. |
+| 2 | 168 hours | AI | Case-study angle. Prove value. Single CTA. |
+| 3 | 288 hours | AI | Polite break-up: "Should I close the loop?" |
 
-For each AI step, write a one-line instruction. Example for Step 3: `Polite break-up email. Ask if it is the wrong time or wrong contact. Under 60 words.`
+Save sequence.
 
-Click **Save sequence**. Peek at the **Timeline** tab to see the schedule laid out.
+### Step 11 — Enroll leads
 
-### Enroll everyone + start
+- Same campaign → Sequence Builder → **Builder** tab → **Enroll all leads**.
+- Every lead now has a status (`active`) and a computed `next_send_at` (respecting your schedule).
 
-Back on the Builder tab, **Enroll all leads** → **Resume**. You're live.
+### Step 12 — Go live
 
----
+- Sequence Builder → **Queue** tab → ▶ **Resume** (or from Outreach Campaigns page click Play).
 
-## 4. Your first week — dial in what works
+The system now:
+- Waits for business hours in the prospect's timezone.
+- Composes each email at send time using: prospect facts (scraped from their site) + your Knowledge Bases + your prompt + your template + your signature.
+- Rotates across your connected inboxes.
+- Automatically stops any lead who replies, books a meeting, unsubscribes, bounces, or complains.
+- Retries transient failures with exponential backoff.
 
-### Day 1
-
-- Sends start. Check the **Queue** tab every few hours to make sure emails are actually going out.
-- Any errors will show as **Failed** in the queue with a reason (bad password, bounce, suppression, etc.).
-
-### Days 2–4
-
-- First replies start coming in. Sidebar → **Replies Intelligent Box**.
-- Each reply is auto-tagged. Focus on the 🟢 **Interested** and 📅 **Meeting Requested** ones first.
-- Reply within 4 hours if possible. Fast replies book 3× more meetings.
-- Use **Generate AI Draft** as a starting point, then edit for tone.
-
-### Days 5–7
-
-- Check **Sequence Builder → Analytics** tab.
-- Look at reply rate. Anything over 3% on Step 0 is decent. Under 1% means the copy or the list is off.
-- **Per Sender** table shows if one of your inboxes has a much lower reply rate than the others — could be a deliverability issue with that specific account.
-
-### After 7 days
-
-Two adjustments to make:
-
-1. **Winners**: Clone the campaign, tweak the subject or opening line, run it against a fresh list.
-2. **Losers**: Pause anything under 1% reply rate. Change the target audience OR change the pitch — don't just resend the same thing.
+Leave it running.
 
 ---
 
-## 5. The 8 things every screen does
+## 5. Using Knowledge Bases (RAG) — the killer feature
 
-Quick reference — one line per screen:
+**The point**: instead of the AI hallucinating what your company does, it retrieves *your actual facts* from documents you uploaded, and only writes emails using those facts.
 
-| Screen | What it's for | When to open it |
+### How it works, step by step
+
+1. You upload a **PDF/DOCX/TXT** to a Knowledge Base.
+2. The system **extracts the text** (real `pdf-parse` / `mammoth` — not just filename metadata).
+3. Text is **chunked** into 1200-character overlapping windows.
+4. Each chunk is **embedded** (turned into a 1536-dim vector) using your chosen provider — OpenAI, Voyage, Gemini, or a local Ollama model.
+5. Vectors are **stored in Postgres** alongside the source text.
+6. When it's time to write an email to Priya @ Acme, the system:
+   - Builds a query from: campaign goal + prospect's company name + industry + personalization facts.
+   - Embeds that query with the same provider.
+   - Runs **cosine similarity** across all vectors in your selected KBs.
+   - Returns the top-6 most relevant chunks.
+   - Feeds those chunks into the LLM under a **"COMPANY KNOWLEDGE — never contradict these facts"** header.
+7. The LLM writes an email that references those exact facts.
+
+Result: the AI never invents pricing, features, or case studies. If you didn't upload it, it can't say it.
+
+### What to put in your Knowledge Base
+
+| KB | Contents |
+|---|---|
+| **Company Profile** | One-page overview. Elevator pitch. Founding story. Who you're for. |
+| **Pricing** | Tier names, prices, what's included. |
+| **Case Studies** | 2-4 paragraph stories. Customer name, problem, solution, measurable result. Two or three of these dramatically improve reply rates. |
+| **Product Features** | Feature list. What each does. When to mention it. |
+| **Portfolio** | Sample projects, deliverables, screenshots-as-text. |
+| **Vertical KBs** | One per industry — e.g. `Healthcare KB`, `Manufacturing KB`, `SaaS KB`. Contains pitches and case studies relevant to that vertical. Assign per-campaign. |
+
+### Combining multiple KBs on one campaign
+
+You **can and should** assign multiple KBs to one campaign. The AI's query hits all of them at once and picks the top-K chunks across the whole pool.
+
+Example: campaign targeting AI startups →
+- ✓ Company Profile (always)
+- ✓ Case Studies (always)
+- ✓ Pricing (so the AI can quote correctly if asked)
+- ✓ AI-vertical KB (case studies specific to AI companies)
+- ✗ Manufacturing KB (irrelevant — leave off)
+
+### Testing your KB before sending real emails
+
+Open any Knowledge Base → scroll to **Test vector search**. Type a question the way a prospect might phrase it. You'll see the top matching chunks with cosine scores. If the top result is garbage, your file wasn't extracted well — try re-uploading as a plain `.txt` file.
+
+### Embedding provider choice
+
+| Provider | When to use | Cost |
 |---|---|---|
-| **Analytics Dashboard** | All-campaigns bird's-eye view | Once a day |
-| **Lead Discovery** | Search Google Maps for businesses | When you need fresh leads |
-| **AI Lead Finder** | AI-generated lead list | When you want LinkedIn-style prospects |
-| **CRM Pipeline Board** | Drag prospects between stages | Managing warm leads |
-| **Outreach Campaigns** | Create, pause, delete campaigns | Whenever you launch or manage a campaign |
-| **Sequence Builder** | The heart of the app — design + monitor sequences | Multiple times per day |
-| **SMTP Accounts Router** | Connect and health-check sending inboxes | Once per inbox |
-| **Replies Intelligent Box** | Every reply, tagged | Every few hours |
+| **OpenAI** (default) | Most common; great quality; ~$0.02 per million tokens | Cheap |
+| **Voyage** | State-of-the-art quality; slightly better retrieval than OpenAI | Cheap |
+| **Gemini** | You already have a Gemini API key | Cheap |
+| **Ollama** (local) | Air-gapped / privacy-sensitive; runs on your own hardware | Free |
+
+The provider is picked **per Knowledge Base** at creation time. Don't mix providers within one KB.
 
 ---
 
-## 6. How to write cold emails that get replies
+## 6. How the email you send looks (the new design)
 
-Non-negotiable rules:
+Every email that leaves the system now goes through a **professional email shell**:
 
-**Subject line** — 3 to 5 words. Lowercase. Curiosity-inducing without being clickbait. Bad: `AMAZING OPPORTUNITY!!!` Good: `quick question about zensoft`.
+- **600px wide, table-based** — renders correctly in Gmail, Outlook (all versions), Apple Mail, Yahoo, and mobile clients.
+- **Mobile-responsive** — collapses to full width on phones.
+- **Preheader text** — the one-line preview shown next to the subject in the inbox list.
+- **Accent brand color** — a thin bar at the top of the email in your brand color.
+- **Typographic hierarchy** — first paragraph is slightly bolder (functions as opening hook), rest is standard body.
+- **CTA auto-buttons** — links whose text starts with "book", "schedule", "reply", "download", "get", "try", "meet" (etc.) automatically become styled buttons in your brand color.
+- **Signature block** — separated by a subtle divider, muted text.
+- **CAN-SPAM footer** — company name, physical postal address, one-click unsubscribe link.
+- **Invisible tracking pixel** — for open detection.
+- **Click-tracked links** — all `<a href>` links are rewritten to route through your tracking endpoint.
 
-**Opening line** — reference something specific about them from their website. Not their name, not "hope you're doing well". Something a robot wouldn't say. Example: `Saw your team is hiring 3 more account executives — congrats on the growth.`
+Before this release, emails were raw HTML from the AI — plain text or basic paragraphs. Now they land in your prospect's inbox looking like a designed marketing email but personal in tone.
 
-**Body** — 90 to 140 words. One clear value point. One clear ask.
+### See it yourself
 
-**Call to action** — ONE ask. Not "reply if you're interested, or share this with your VP, or check out our site." Just: `Worth a 10-minute chat next Tuesday?`
+After deploying, generate a preview by running:
 
-**Signature** — Name, title, company. That's it. No banners. No quotes. No social icons.
+```bash
+npx tsx scripts/preview_email.ts
+```
 
-### Follow-up rules
+That writes a sample HTML to `dist/email_preview.html`. Open it in a browser to see the exact shell prospects will receive.
 
-- Follow-ups outperform the first email 2:1 in reply rate. Never skip them.
-- Every follow-up needs a new angle. Don't just say "did you see my last email?" — that's spam.
-- Angles that work: a customer story, an industry-specific stat, a question about their tech stack, a polite break-up.
-- Break-up email at the end usually gets the most replies. Yes really.
+### What the AI still controls vs. what the shell adds
 
-### Words that trip spam filters
+The AI produces the **body content** (opening line + paragraphs + inline links). The shell adds:
 
-Avoid, especially in subject lines: `FREE`, `GUARANTEE`, `ACT NOW`, `LIMITED TIME`, `100% RISK FREE`, `CLICK HERE`, `URGENT`, `!!!`, ALL-CAPS anything.
+- Container + accent bar
+- Preheader
+- CTA button styling
+- Signature separator
+- Footer + tracking
 
----
+If the AI writes:
 
-## 7. Deliverability — how to stay out of spam
+```
+Hi Priya,
 
-If your emails land in spam, everything else is wasted. Do these once, benefit forever:
+Saw your team just posted three AE roles. We help teams like yours...
 
-### The 4-item deliverability checklist
+Book a 15-min chat next Tuesday?
 
-- [ ] **Verified sending domain**. Sidebar → **DNS & Verified Domains**. Add three DNS records (SPF, DKIM, DMARC). Wait ~10 minutes. All three should turn green.
-- [ ] **Warmup enabled** on every inbox. It gradually ramps your send volume so mailbox providers trust you.
-- [ ] **Daily send limit** starts at 50 per inbox for the first 2 weeks. Then 100. Then 150. Never jump from 50 to 500.
-- [ ] **Unsubscribe link** in every email (the platform adds it automatically — don't remove it).
+— Krutarth
+```
 
-### Signs you're in spam
-
-- Open rates suddenly drop from 40% to 5%.
-- Reply rate drops to 0.
-- Your test emails to your own Gmail land in the Promotions tab or Spam folder.
-
-### Fix a domain that's in spam
-
-1. Immediately reduce daily send limit to 10 per inbox.
-2. Do NOT send more emails from this domain for 3 days.
-3. Send one plain-text personal email to a friend and ask them to reply.
-4. Ask 5 colleagues to check their spam folder for anything from you and click "Not Spam".
-5. After 3 days, resume with 20 emails/day for a week.
-
-### Use multiple sending inboxes (sender pools)
-
-Instead of sending 500 emails from one Gmail, connect 5 inboxes and send 100 from each. Spreads load, protects reputation. The platform rotates automatically.
-
-Sidebar → **SMTP Accounts Router** — add all 5. Then a **Sender Pool** groups them, and your campaign uses the pool.
+The prospect sees a beautifully-formatted email with **"Book a 15-min chat"** rendered as a big blue button, your signature below a divider, and CAN-SPAM footer at the bottom.
 
 ---
 
-## 8. Best practices that separate 1% reply rate from 10%
+## 7. Reading + replying to incoming mail
 
-**1. Tight targeting beats a big list every time.** 50 perfectly-fitting leads beat 500 kind-of-fitting ones.
+- Sidebar → **Replies Intelligent Box**.
+- Every reply lands here, sorted newest first, auto-tagged into one of 9 buckets:
 
-**2. First email under 100 words.** Every extra sentence loses ~5% of replies.
+  🟢 **Interested** · 📅 **Meeting Requested** · ❓ **Need More Information**  
+  💰 **Price Objection** · 🔴 **Not Interested** · 🏝️ **Out of Office**  
+  🤖 **Auto Reply** · 🚫 **Spam Complaint** · ⚠️ **Bounce**
 
-**3. Ask one question.** Not "Would you like a demo, or a whitepaper, or..." Just one thing.
-
-**4. Send Tuesday–Thursday, 9–11 AM prospect time.** Avoid Monday morning (inbox flood) and Friday afternoon (already checked out).
-
-**5. Follow up 3 to 5 times.** Most replies come from follow-up #2 or #3.
-
-**6. Use their words, not yours.** Read their About page. If they say "clients" not "customers", you say "clients" too.
-
-**7. Never attach a PDF.** Kills deliverability. Put a link to your site instead — or better, describe the offer in the email itself.
-
-**8. Reply within 4 hours.** The response window is short. Set up notifications.
-
-**9. Track meetings booked, not opens.** Opens are inflated by Gmail image proxies. Meetings are real.
-
-**10. Test one variable at a time.** Don't change the subject AND the body AND the CTA. Change one, run 50 leads, measure, keep or drop.
+- Click a reply → see the AI-generated one-sentence summary + full thread.
+- Click **Generate AI Draft** to get a suggested response you can edit and send.
+- Everyone who replies is **automatically removed from all follow-ups** across every campaign in your workspace.
 
 ---
 
-## 9. Team collaboration
+## 8. Analytics + tracking what worked
 
-If your team has multiple people:
+**Global**: Sidebar → **Analytics Dashboard** — all-time totals, active campaigns, average open/reply rates, recent replies feed.
 
-1. **Team Management** → **+ Invite Member**.
-2. Enter their name, email, and role.
-3. They get an invite link. They register with that email.
+**Per campaign**: Sequence Builder → **Analytics** tab —
+- Reply rate (the only rate that matters)
+- Meeting rate (even better)
+- Open rate (grain of salt — proxies inflate)
+- Bounce rate (keep < 5%)
+- Per sender + per provider breakdowns
 
-Roles:
-- **Admin** — everything.
-- **User** — can create campaigns, send emails, but can't invite others or change billing.
-- **Team Member** — read-only + reply to messages assigned to them.
-
-Every campaign, lead, and reply is scoped to your **workspace**. Team members see the same data. Actions are logged with who did what.
+**Live queue**: Sequence Builder → **Queue** tab — real-time counts of queued / sending / completed / paused / failed / waiting emails.
 
 ---
 
-## 10. Frequently asked questions
+## 9. Team, roles, and access
 
-**How many emails can I send per day?**
-Depends on your inbox limits, but 200–500 per day per inbox is safe if you've warmed up properly. Connect multiple inboxes to scale beyond that.
-
-**Will it work with my existing Gmail?**
-Yes. Any Gmail account works — personal, Google Workspace, whatever. You just need an App Password (2 minutes to set up).
-
-**Does it work with Outlook / Microsoft 365?**
-Yes. Same 2-minute App Password flow.
-
-**Do I need a domain?**
-Yes — you need to send from a real address (like `you@yourcompany.com`), not `@gmail.com`, for the best deliverability. Cheap domains are $10/year. Worth it.
-
-**How is this different from Mailchimp / MailerLite?**
-Those are for marketing to people who already signed up. Outbound.AI is for reaching people who have never heard of you.
-
-**Is cold email legal?**
-In the US: yes, as long as you include a physical address + unsubscribe link (both auto-added). In EU/UK: GDPR is stricter — B2B emails to legitimate prospects are allowed under "legitimate interest" but you must honor unsubscribes and provide an address. In Canada: CASL requires more explicit consent, so be careful.
-
-**Can I use my own AI keys?**
-Yes. The workspace is set up to use whatever AI provider your admin configured (Groq or Gemini). You don't need to touch this.
-
-**What if a lead unsubscribes?**
-Their email goes on the **suppression list**. They will never be contacted again from any campaign, from any inbox, for any reason. This is enforced at the system level.
-
-**Can I schedule a campaign to start in the future?**
-Not directly — but you can create the campaign, set it up completely, and just leave it in Draft. When you're ready, click Resume.
-
-**What happens when a lead replies?**
-1. The reply lands in the Replies Intelligent Box, categorized by AI.
-2. All follow-ups to that person are stopped immediately.
-3. If they replied "Interested" or "Meeting Requested", they show up in your CRM Pipeline Board for follow-up.
-
-**Can I A/B test subject lines?**
-Yes. In Sequence Builder, each step has an `A/B group` field. Create the same step with `abGroup: A` and `abGroup: B`, different subjects. Prospects are randomly assigned. Compare reply rates in Analytics.
-
-**What if my inbox gets flagged?**
-- Pause all campaigns using that inbox immediately.
-- Sidebar → SMTP Accounts Router → set that account to Inactive.
-- Do NOT send from that inbox for 5–7 days.
-- When you resume, start at 10 emails/day for a week.
-
-**How do I export my leads?**
-CRM Pipeline Board → **Export CSV**. All leads + their current stage.
-
-**Can I import from Salesforce / HubSpot?**
-Not directly. Export from your CRM as a CSV, then upload here.
-
-**What about my prospect's timezone?**
-Set it at the campaign level (Schedule tab). The system respects it. If a lead's own timezone is known, that takes priority.
+- Sidebar → **Team Management** → invite by email.
+- **Only whitelisted emails may register.** If you invite someone whose email isn't whitelisted, their registration will be blocked. Ask an admin to add them to `REGISTRATION_WHITELIST` (env var).
+- Every workspace is fully isolated. A user in Workspace A can never see, read, or mutate anything in Workspace B — enforced at the database layer.
 
 ---
 
-## 11. Need help?
+## 10. Troubleshooting
 
-**Something's broken:**
-- Refresh the page first.
-- Check that your SMTP account is Healthy (green) in SMTP Accounts Router.
-- If still stuck, contact your admin — they have server logs.
+**"Only whitelisted users are allowed to register"** — expected. Your email isn't on the whitelist. Ask the admin to add you.
 
-**Deliverability question:**
-- Read [Section 7](#7-deliverability--how-to-stay-out-of-spam) again.
-- Test your setup with [mail-tester.com](https://mail-tester.com) — score should be 9/10 or higher.
+**"Failed to fetch" toasts** — refresh the page. Silent poll retries handle transient errors; if you still see it after a refresh, the server is likely down.
 
-**AI wrote a weird email:**
-- Refine the Goal field on your campaign — one clear sentence works better than a paragraph.
-- Add more detail to the AI Instruction on the specific step.
+**Emails go to spam** — verify your domain (§4 step 1). Keep warmup ON. Start at 50 emails/day for the first two weeks.
 
-**No replies at all after 100+ sends:**
-- Your list, subject line, or opener is the problem — not the platform.
-- Re-read [Section 6](#6-how-to-write-cold-emails-that-get-replies).
-- Try a completely different niche or angle.
+**AI is generic / doesn't mention my product** — you haven't assigned Knowledge Bases to the campaign. Go to Sequence Builder → Resources → tick your KBs → Save.
+
+**AI hallucinates features you don't have** — your Knowledge Base is missing that info. Add a document containing your real feature list.
+
+**High bounce rate** — your list is bad. Filter your CSV to only emails you're confident exist. Cold-email vendors like Anymail Finder or Hunter validate before returning results.
+
+**No replies at all after 100+ sends** — your copy is the problem, not the platform. Re-read the sequence, shorten the emails, ensure they reference specific facts about the prospect.
+
+**Container "server does not support SSL"** — you're running an old backend image. `git pull && docker compose build backend && docker compose up -d backend`.
 
 ---
 
-## Ready?
+## 11. Glossary — plain English
 
-Open the portal. Add one inbox. Find one lead. Send one email. Come back in an hour to check the reply.
+| Term | Meaning |
+|---|---|
+| **Workspace** | Your isolated container of campaigns / leads / data. One per registered user. Nobody else can see your data. |
+| **Knowledge Base (KB)** | A folder of uploaded documents (PDF/DOCX/etc.) that the AI reads before writing. |
+| **RAG** | Retrieval-Augmented Generation. Fancy name for "the AI looks up your KB before writing". |
+| **Embedding** | A math-vector representation of a chunk of text. Enables similarity search. |
+| **Chunk** | A ~1200-character piece of a document. The unit of retrieval. |
+| **Similarity search** | Given a query, find the top-N most similar chunks. Cosine-distance based. |
+| **Sequence** | The ordered list of emails: first email + follow-ups. |
+| **Prospect** | A single lead's journey through one campaign. Has status (active/paused/stopped/completed) and next-send-at. |
+| **Warmup** | Slowly increasing daily send volume so mailbox providers trust you. |
+| **Suppression list** | People who will never be emailed again — bounces, complaints, unsubscribes, manual. |
+| **Sender pool** | A group of your sending inboxes. Rotates across them. |
+| **CAN-SPAM** | US law requiring physical postal address + unsubscribe link in every commercial email. The platform enforces both. |
+| **Preheader** | The one-line preview shown next to the subject in your inbox. |
+| **CTA** | Call to action — the one thing you want the prospect to do (e.g. "Book a chat"). |
 
-That's the whole loop. Everything else is just doing more of it, better.
+---
+
+## Cheat sheet — what does what
+
+| I want to… | Go here |
+|---|---|
+| Add a Gmail / Outlook / SMTP inbox | SMTP Accounts Router |
+| Verify my sending domain | DNS & Verified Domains |
+| Upload company docs so the AI knows my product | Knowledge Center → Knowledge Bases |
+| Save a signature | Knowledge Center → Signatures |
+| Save a reusable email template | Knowledge Center → Email Templates |
+| Save a reusable prompt | Knowledge Center → Prompt Library |
+| Find businesses to email | Lead Discovery *or* AI Lead Finder |
+| Import a lead CSV | Campaigns → open campaign → Upload CSV |
+| Create a campaign | Outreach Campaigns → + New |
+| Set schedule / hours / caps | Sequence Builder → Schedule tab |
+| Pick which KBs / templates / signature / prompt this campaign uses | Sequence Builder → Resources tab |
+| Design the multi-step follow-up | Sequence Builder → Builder tab |
+| See what will be sent next | Sequence Builder → Builder → Preview Next |
+| Pause / resume / clone a campaign | Sequence Builder → Queue tab |
+| Read + reply to incoming mail | Replies Intelligent Box |
+| See real-time send counts | Sequence Builder → Queue tab |
+| See reply / open / bounce rates | Sequence Builder → Analytics tab |
+| Global dashboard across everything | Analytics Dashboard |
+| Add a team member | Team Management |
+
+That's every screen. Start with **§3 (5-minute path)** to feel the shape, then run through **§4** for a real campaign.
 
 Good selling.

@@ -24,6 +24,7 @@ import {
 import { suppressionRepository } from "../db/repositories/suppression.repository";
 import { suppressionCacheService } from "./suppressionCache.service";
 import { trackingService } from "./tracking.service";
+import { emailFormatterService } from "./emailFormatter.service";
 import { getProviderFor, EmailPayload, EmailProviderError } from "../providers/email";
 import { log } from "../observability/logger";
 
@@ -101,7 +102,24 @@ export const emailDispatchService = {
     }
 
     const orgName = opts.orgName || "Outbound.AI";
-    const withFooters = trackingService.injectFooters(email.bodyText, email.bodyHtml, email.id, orgName);
+    // Compose the ORDER of transformations carefully:
+    //   1. Wrap raw body in the professional email shell (600px, responsive,
+    //      table-based, CTA-button aware). Idempotent — re-runs on an
+    //      already-wrapped body are a no-op.
+    //   2. Inject CAN-SPAM footer (company + address + unsubscribe).
+    //   3. Inject open-tracking pixel + rewrite links to click-tracked URLs.
+    //
+    // Doing (1) before (2)+(3) lets the shell carry the footer + pixel
+    // inside its <body> tag, which is where email clients look for them.
+    const shelled = emailFormatterService.wrap({
+      subject: email.subject,
+      bodyHtml: email.bodyHtml,
+      bodyText: email.bodyText,
+      preheader: email.openingLine || undefined,
+      senderCompany: orgName,
+      accentColor: "#2563eb",
+    });
+    const withFooters = trackingService.injectFooters(email.bodyText, shelled, email.id, orgName);
     const html = trackingService.injectHtmlTracking(withFooters.bodyHtml, email.id);
 
     const payload: EmailPayload = {
