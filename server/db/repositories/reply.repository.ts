@@ -27,7 +27,18 @@ const JOIN_FIELDS = `
 `;
 
 export const replyRepository = {
-  async list(): Promise<Reply[]> {
+  async list(workspaceId?: string): Promise<Reply[]> {
+    if (workspaceId) {
+      const r = await pool.query(
+        `SELECT ${JOIN_FIELDS} FROM replies r
+         LEFT JOIN campaigns c ON c.id = r.campaign_id
+         LEFT JOIN leads l     ON l.id = r.lead_id
+         WHERE r.workspace_id = $1 AND r.deleted_at IS NULL
+         ORDER BY r.received_at DESC LIMIT 500`,
+        [workspaceId]
+      );
+      return r.rows.map(mapReply);
+    }
     const r = await pool.query(
       `SELECT ${JOIN_FIELDS} FROM replies r
        LEFT JOIN campaigns c ON c.id = r.campaign_id
@@ -38,7 +49,17 @@ export const replyRepository = {
     return r.rows.map(mapReply);
   },
 
-  async findById(id: string): Promise<Reply | null> {
+  async findById(id: string, workspaceId?: string): Promise<Reply | null> {
+    if (workspaceId) {
+      const r = await pool.query(
+        `SELECT ${JOIN_FIELDS} FROM replies r
+         LEFT JOIN campaigns c ON c.id = r.campaign_id
+         LEFT JOIN leads l     ON l.id = r.lead_id
+         WHERE r.id = $1 AND r.workspace_id = $2 AND r.deleted_at IS NULL`,
+        [id, workspaceId]
+      );
+      return r.rows[0] ? mapReply(r.rows[0]) : null;
+    }
     const r = await pool.query(
       `SELECT ${JOIN_FIELDS} FROM replies r
        LEFT JOIN campaigns c ON c.id = r.campaign_id
@@ -49,13 +70,14 @@ export const replyRepository = {
     return r.rows[0] ? mapReply(r.rows[0]) : null;
   },
 
-  async create(input: CreateReplyInput): Promise<Reply> {
+  async create(input: CreateReplyInput & { workspaceId?: string }): Promise<Reply> {
     const id = `rep-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     await pool.query(
-      `INSERT INTO replies (id, campaign_id, lead_id, from_email, subject, body_text, sentiment, ai_suggested_reply)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      `INSERT INTO replies (id, workspace_id, campaign_id, lead_id, from_email, subject, body_text, sentiment, ai_suggested_reply)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         id,
+        input.workspaceId || null,
         input.campaignId || null,
         input.leadId || null,
         input.fromEmail,
@@ -65,22 +87,40 @@ export const replyRepository = {
         input.aiSuggestedReply || null,
       ]
     );
-    const out = await this.findById(id);
+    const out = await this.findById(id, input.workspaceId);
     if (!out) throw new Error("Reply create returned null");
     return out;
   },
 
-  async markRead(id: string): Promise<void> {
-    await pool.query("UPDATE replies SET is_read = TRUE WHERE id = $1", [id]);
+  async markRead(id: string, workspaceId?: string): Promise<boolean> {
+    if (workspaceId) {
+      const r = await pool.query(
+        `UPDATE replies SET is_read = TRUE WHERE id = $1 AND workspace_id = $2`,
+        [id, workspaceId]
+      );
+      return (r.rowCount ?? 0) > 0;
+    }
+    const r = await pool.query(`UPDATE replies SET is_read = TRUE WHERE id = $1`, [id]);
+    return (r.rowCount ?? 0) > 0;
   },
 
   async setSentiment(id: string, sentiment: ReplySentiment): Promise<void> {
     await pool.query("UPDATE replies SET sentiment = $1 WHERE id = $2", [sentiment, id]);
   },
 
-  async recentSentimentCounts(): Promise<Record<string, number>> {
+  async recentSentimentCounts(workspaceId?: string): Promise<Record<string, number>> {
+    if (workspaceId) {
+      const r = await pool.query(
+        `SELECT sentiment, COUNT(*)::int AS n FROM replies
+         WHERE workspace_id = $1 AND deleted_at IS NULL GROUP BY sentiment`,
+        [workspaceId]
+      );
+      const out: Record<string, number> = {};
+      for (const row of r.rows) out[row.sentiment] = row.n;
+      return out;
+    }
     const r = await pool.query(
-      "SELECT sentiment, COUNT(*)::int AS n FROM replies WHERE deleted_at IS NULL GROUP BY sentiment"
+      `SELECT sentiment, COUNT(*)::int AS n FROM replies WHERE deleted_at IS NULL GROUP BY sentiment`
     );
     const out: Record<string, number> = {};
     for (const row of r.rows) out[row.sentiment] = row.n;

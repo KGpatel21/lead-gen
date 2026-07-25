@@ -105,7 +105,7 @@ export class CampaignAutomationController {
     let leadIds: string[] = Array.isArray(req.body?.leadIds) ? req.body.leadIds : [];
     if (leadIds.length === 0) {
       // No explicit leadIds → enroll every lead already attached to the campaign.
-      const leads = await leadRepository.listByCampaign(id);
+      const leads = await leadRepository.listByCampaign(id, req.workspaceId!);
       leadIds = leads.map((l: any) => l.id);
     }
     const result = await sequenceEngineService.enrollBulk({
@@ -247,7 +247,7 @@ export class CampaignAutomationController {
     const camp = await campaignRepository.findById(id, req.workspaceId);
     if (!camp) { bad(res, "campaign not found", 404); return; }
     await cancelCampaign(id);
-    await campaignRepository.softDelete(id);
+    await campaignRepository.softDelete(id, req.workspaceId!);
     res.json({ success: true });
   }
 

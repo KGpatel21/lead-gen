@@ -119,7 +119,7 @@ export const campaignRepository = {
     return mapCampaign(r.rows[0]);
   },
 
-  async update(id: string, patch: Partial<Record<keyof typeof ALLOWED_UPDATE_FIELDS, unknown>>): Promise<Campaign | null> {
+  async update(id: string, patch: Partial<Record<keyof typeof ALLOWED_UPDATE_FIELDS, unknown>>, workspaceId?: string): Promise<Campaign | null> {
     const sets: string[] = [];
     const values: unknown[] = [];
     let i = 1;
@@ -135,11 +135,15 @@ export const campaignRepository = {
       }
       i++;
     }
-    if (sets.length === 0) return this.findById(id);
+    if (sets.length === 0) return this.findById(id, workspaceId);
     sets.push(`updated_at = NOW()`);
     values.push(id);
+    const scope = workspaceId ? ` AND workspace_id = $${i + 1}` : "";
+    if (workspaceId) values.push(workspaceId);
     const r = await pool.query(
-      `UPDATE campaigns SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL RETURNING *`,
+      `UPDATE campaigns SET ${sets.join(", ")}
+       WHERE id = $${i} AND deleted_at IS NULL${scope}
+       RETURNING *`,
       values
     );
     return r.rows[0] ? mapCampaign(r.rows[0]) : null;
@@ -162,15 +166,32 @@ export const campaignRepository = {
     );
   },
 
-  async setStatus(id: string, status: CampaignStatus): Promise<void> {
-    await pool.query(
-      "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2",
-      [status, id]
-    );
+  async setStatus(id: string, status: CampaignStatus, workspaceId?: string): Promise<void> {
+    // Internal callers (workers driven by BullMQ) don't have request-scoped
+    // workspaceId — they already verified the parent by id. HTTP paths must
+    // pass workspaceId (enforced at the controller layer).
+    if (workspaceId) {
+      await pool.query(
+        `UPDATE campaigns SET status = $1, updated_at = NOW()
+         WHERE id = $2 AND workspace_id = $3`,
+        [status, id, workspaceId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [status, id]
+      );
+    }
   },
 
-  async softDelete(id: string): Promise<void> {
-    await pool.query("UPDATE campaigns SET deleted_at = NOW() WHERE id = $1", [id]);
+  async softDelete(id: string, workspaceId: string): Promise<boolean> {
+    if (!workspaceId) throw new Error("[campaignRepository.softDelete] workspaceId required");
+    const r = await pool.query(
+      `UPDATE campaigns SET deleted_at = NOW()
+       WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+      [id, workspaceId]
+    );
+    return (r.rowCount ?? 0) > 0;
   },
 
   async archive(id: string): Promise<void> {

@@ -14,6 +14,48 @@ import { AuthenticatedRequest } from "../middleware/auth.middleware";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_PASSWORD_LEN = 8;
 
+/**
+ * Registration whitelist.
+ *
+ * While the product is in closed beta, only these specific mailboxes may
+ * self-register. Anyone else attempting to register gets HTTP 403
+ * ("Only whitelisted users are allowed to register.") — the account is
+ * NOT created, no workspace is provisioned, no partial state is left
+ * behind.
+ *
+ * Roles are baked in per address so we don't rely on the "first user
+ * becomes admin" heuristic — which would have promoted whoever raced to
+ * the register endpoint first. `krutarth212002@gmail.com` is always
+ * ADMIN; every other whitelisted mailbox is a regular USER.
+ *
+ * The list can be extended via `REGISTRATION_WHITELIST` (comma-separated
+ * emails) and `REGISTRATION_ADMIN_EMAILS` (comma-separated admin
+ * emails) env vars for future onboarding, without a code change.
+ */
+const BUILTIN_ADMINS = new Set<string>([
+  "krutarth212002@gmail.com",
+]);
+const BUILTIN_ALLOWED = new Set<string>([
+  "krutarth212002@gmail.com",
+  "utubekiller1@gmail.com",
+]);
+
+function parseCsvSet(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw.split(",").map((s) => s.trim().toLowerCase()).filter((s) => EMAIL_REGEX.test(s))
+  );
+}
+
+function allowedRegistrationEmails(): Set<string> {
+  const extra = parseCsvSet(process.env.REGISTRATION_WHITELIST);
+  return new Set([...BUILTIN_ALLOWED, ...extra]);
+}
+function adminRegistrationEmails(): Set<string> {
+  const extra = parseCsvSet(process.env.REGISTRATION_ADMIN_EMAILS);
+  return new Set([...BUILTIN_ADMINS, ...extra]);
+}
+
 export class AuthController {
   public static async register(req: Request, res: Response): Promise<void> {
     const { name, email, password } = req.body;
@@ -30,17 +72,33 @@ export class AuthController {
       return;
     }
 
+    // ---- Registration whitelist gate ----
+    const normalisedEmail = email.trim().toLowerCase();
+    const allowed = allowedRegistrationEmails();
+    if (!allowed.has(normalisedEmail)) {
+      await logAudit(`Registration blocked: ${normalisedEmail}`, "SECURITY", {
+        userEmail: normalisedEmail,
+        ipAddress: req.ip,
+        details: "Not on registration whitelist",
+      });
+      res.status(403).json({
+        success: false,
+        error: "Only whitelisted users are allowed to register. Please contact the administrator.",
+      });
+      return;
+    }
+
     const existing = await userRepository.findByEmail(email);
     if (existing) {
       res.status(409).json({ success: false, error: "An account with this email already exists." });
       return;
     }
 
-    // First registered user gets ADMIN + inherits the default workspace.
-    // Every subsequent user gets their own fresh workspace so multi-tenant
-    // isolation is enforced from the moment they sign up.
+    // Role is decided by the whitelist, NOT by "first user wins" — that
+    // heuristic used to hand admin to whoever raced to the endpoint first.
+    const admins = adminRegistrationEmails();
+    const role = admins.has(normalisedEmail) ? SecurityRole.ADMIN : SecurityRole.USER;
     const userCount = await userRepository.count();
-    const role = userCount === 0 ? SecurityRole.ADMIN : SecurityRole.USER;
 
     const salt = SecurityService.newSalt();
     const passwordHash = SecurityService.hashPassword(password, salt);

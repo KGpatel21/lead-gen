@@ -40,7 +40,9 @@ export class QueueWorker {
     // Step A: enqueue outbound sends for RUNNING campaigns
     const running = await campaignRepository.listRunning();
     for (const campaign of running) {
-      const pending = await leadRepository.listPendingByCampaign(campaign.id);
+      // Worker-side: hydrate leads scoped by the campaign's own workspace so
+      // one tenant's worker sweep never touches another tenant's rows.
+      const pending = await leadRepository.listPendingByCampaign(campaign.id, (campaign as any).workspaceId);
       if (pending.length === 0) {
         // Mark campaign completed if there are no pending leads AND no active queue items
         const anyQueue = await queueRepository.listPage(

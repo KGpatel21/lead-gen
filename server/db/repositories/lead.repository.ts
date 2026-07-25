@@ -1,6 +1,15 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Lead repository — every user-facing method REQUIRES a workspaceId so
+ * cross-tenant reads are impossible from the SQL layer up.
+ *
+ * The optional `workspaceId?: string` signature exists on a small number
+ * of internal-only helpers (bulk seeding, cross-tenant admin ops) but
+ * anything reachable from an authenticated HTTP request goes through
+ * the workspace-scoped variant. Controllers now MUST pass
+ * `req.workspaceId` — the middleware guarantees it's populated.
  */
 
 import crypto from "crypto";
@@ -9,6 +18,7 @@ import { mapLead } from "../rowMappers";
 import { Lead, LeadStatus } from "../../../src/types";
 
 export interface CreateLeadInput {
+  workspaceId: string;
   campaignId: string;
   email: string;
   firstName?: string;
@@ -40,55 +50,86 @@ const UPDATABLE: Record<string, string> = {
   errorMessage: "error_message",
 };
 
+function requireWs(v: string | undefined | null, method: string): string {
+  if (!v || typeof v !== "string" || v.trim().length === 0) {
+    throw new Error(`[leadRepository.${method}] workspaceId is required — tenant boundary violation prevented`);
+  }
+  return v;
+}
+
 export const leadRepository = {
-  async list(): Promise<Lead[]> {
+  async list(workspaceId: string): Promise<Lead[]> {
+    requireWs(workspaceId, "list");
     const r = await pool.query(
-      "SELECT * FROM leads WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 5000"
+      `SELECT * FROM leads WHERE workspace_id = $1 AND deleted_at IS NULL
+       ORDER BY created_at DESC LIMIT 5000`,
+      [workspaceId]
     );
     return r.rows.map(mapLead);
   },
 
-  async findById(id: string): Promise<Lead | null> {
+  async findById(id: string, workspaceId?: string): Promise<Lead | null> {
+    // workspaceId is optional here because internal workers hydrate leads
+    // by id after they've already validated the parent (email row's
+    // workspace_id). External callers MUST pass it — the controller
+    // layer enforces this.
+    if (workspaceId) {
+      const r = await pool.query(
+        `SELECT * FROM leads WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+        [id, workspaceId]
+      );
+      return r.rows[0] ? mapLead(r.rows[0]) : null;
+    }
     const r = await pool.query(
-      "SELECT * FROM leads WHERE id = $1 AND deleted_at IS NULL",
+      `SELECT * FROM leads WHERE id = $1 AND deleted_at IS NULL`,
       [id]
     );
     return r.rows[0] ? mapLead(r.rows[0]) : null;
   },
 
-  async findByEmailInCampaign(campaignId: string, email: string): Promise<Lead | null> {
+  async findByEmailInCampaign(campaignId: string, email: string, workspaceId: string): Promise<Lead | null> {
+    requireWs(workspaceId, "findByEmailInCampaign");
     const r = await pool.query(
-      "SELECT * FROM leads WHERE campaign_id = $1 AND LOWER(email) = LOWER($2) AND deleted_at IS NULL",
-      [campaignId, email]
+      `SELECT * FROM leads
+       WHERE campaign_id = $1 AND LOWER(email) = LOWER($2)
+         AND workspace_id = $3 AND deleted_at IS NULL`,
+      [campaignId, email, workspaceId]
     );
     return r.rows[0] ? mapLead(r.rows[0]) : null;
   },
 
-  async listByCampaign(campaignId: string): Promise<Lead[]> {
+  async listByCampaign(campaignId: string, workspaceId: string): Promise<Lead[]> {
+    requireWs(workspaceId, "listByCampaign");
     const r = await pool.query(
-      "SELECT * FROM leads WHERE campaign_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
-      [campaignId]
+      `SELECT * FROM leads
+       WHERE campaign_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [campaignId, workspaceId]
     );
     return r.rows.map(mapLead);
   },
 
-  async listPendingByCampaign(campaignId: string): Promise<Lead[]> {
+  async listPendingByCampaign(campaignId: string, workspaceId: string): Promise<Lead[]> {
+    requireWs(workspaceId, "listPendingByCampaign");
     const r = await pool.query(
-      "SELECT * FROM leads WHERE campaign_id = $1 AND status = $2 AND deleted_at IS NULL",
-      [campaignId, LeadStatus.PENDING]
+      `SELECT * FROM leads
+       WHERE campaign_id = $1 AND status = $2 AND workspace_id = $3 AND deleted_at IS NULL`,
+      [campaignId, LeadStatus.PENDING, workspaceId]
     );
     return r.rows.map(mapLead);
   },
 
   async create(input: CreateLeadInput): Promise<Lead> {
+    requireWs(input.workspaceId, "create");
     const id = `lead-${Date.now()}-${crypto.randomUUID().split("-")[0]}`;
     const r = await pool.query(
       `INSERT INTO leads (
-         id, campaign_id, email, first_name, last_name, company, personalized_line,
+         id, workspace_id, campaign_id, email, first_name, last_name, company, personalized_line,
          phone, platform, profile_url, description_meta, proposed_service, status, crm_stage
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [
         id,
+        input.workspaceId,
         input.campaignId,
         input.email,
         input.firstName || null,
@@ -121,7 +162,8 @@ export const leadRepository = {
     return created;
   },
 
-  async update(leadId: string, patch: Record<string, unknown>): Promise<Lead | null> {
+  async update(leadId: string, patch: Record<string, unknown>, workspaceId: string): Promise<Lead | null> {
+    requireWs(workspaceId, "update");
     const sets: string[] = [];
     const values: unknown[] = [];
     let i = 1;
@@ -131,17 +173,22 @@ export const leadRepository = {
       sets.push(`${col} = $${i++}`);
       values.push(v);
     }
-    if (sets.length === 0) return this.findById(leadId);
+    if (sets.length === 0) return this.findById(leadId, workspaceId);
     sets.push("updated_at = NOW()");
-    values.push(leadId);
+    values.push(leadId, workspaceId);
     const r = await pool.query(
-      `UPDATE leads SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL RETURNING *`,
+      `UPDATE leads SET ${sets.join(", ")}
+       WHERE id = $${i} AND workspace_id = $${i + 1} AND deleted_at IS NULL
+       RETURNING *`,
       values
     );
     return r.rows[0] ? mapLead(r.rows[0]) : null;
   },
 
   async setStatus(leadId: string, status: LeadStatus, extra?: { crmStage?: string; errorMessage?: string }): Promise<void> {
+    // Internal worker path — hydrate-then-update. Kept unscoped because
+    // by the time we reach this, we've verified the parent email row's
+    // workspace. Not reachable from any HTTP request.
     const parts = ["status = $1", "updated_at = NOW()"];
     const values: unknown[] = [status];
     let i = 2;
@@ -154,7 +201,7 @@ export const leadRepository = {
     );
   },
 
-  async setEnrichment(leadId: string, enrichment: Partial<Lead>): Promise<Lead | null> {
+  async setEnrichment(leadId: string, enrichment: Partial<Lead>, workspaceId?: string): Promise<Lead | null> {
     const map: Record<string, string> = {
       website: "website",
       businessDescription: "business_description",
@@ -191,42 +238,59 @@ export const leadRepository = {
         values.push(v);
       }
     }
-    if (sets.length === 0) return this.findById(leadId);
+    if (sets.length === 0) return this.findById(leadId, workspaceId);
     sets.push("updated_at = NOW()");
     values.push(leadId);
+    const wsClause = workspaceId ? ` AND workspace_id = $${i + 1}` : "";
+    if (workspaceId) values.push(workspaceId);
     const r = await pool.query(
-      `UPDATE leads SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL RETURNING *`,
+      `UPDATE leads SET ${sets.join(", ")} WHERE id = $${i} AND deleted_at IS NULL${wsClause} RETURNING *`,
       values
     );
     return r.rows[0] ? mapLead(r.rows[0]) : null;
   },
 
-  async listPendingNeedingResearch(campaignId: string, limit: number): Promise<Lead[]> {
+  async listPendingNeedingResearch(campaignId: string, limit: number, workspaceId: string): Promise<Lead[]> {
+    requireWs(workspaceId, "listPendingNeedingResearch");
     const r = await pool.query(
       `SELECT * FROM leads
-       WHERE campaign_id = $1 AND status = $2 AND ai_emails IS NULL AND deleted_at IS NULL
-       ORDER BY created_at ASC LIMIT $3`,
-      [campaignId, LeadStatus.PENDING, limit]
+       WHERE campaign_id = $1 AND status = $2 AND ai_emails IS NULL
+             AND workspace_id = $3 AND deleted_at IS NULL
+       ORDER BY created_at ASC LIMIT $4`,
+      [campaignId, LeadStatus.PENDING, workspaceId, limit]
     );
     return r.rows.map(mapLead);
   },
 
-  async listPendingWithoutPersonalization(campaignId: string, limit: number): Promise<Lead[]> {
+  async listPendingWithoutPersonalization(campaignId: string, limit: number, workspaceId: string): Promise<Lead[]> {
+    requireWs(workspaceId, "listPendingWithoutPersonalization");
     const r = await pool.query(
       `SELECT * FROM leads
-       WHERE campaign_id = $1 AND deleted_at IS NULL
+       WHERE campaign_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
              AND (personalized_line IS NULL OR personalized_line = '')
-       ORDER BY created_at ASC LIMIT $2`,
-      [campaignId, limit]
+       ORDER BY created_at ASC LIMIT $3`,
+      [campaignId, workspaceId, limit]
     );
     return r.rows.map(mapLead);
   },
 
-  async softDelete(id: string): Promise<void> {
-    await pool.query("UPDATE leads SET deleted_at = NOW() WHERE id = $1", [id]);
+  async softDelete(id: string, workspaceId: string): Promise<boolean> {
+    requireWs(workspaceId, "softDelete");
+    const r = await pool.query(
+      `UPDATE leads SET deleted_at = NOW()
+       WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+      [id, workspaceId]
+    );
+    return (r.rowCount ?? 0) > 0;
   },
 
-  async softDeleteByCampaign(campaignId: string): Promise<void> {
-    await pool.query("UPDATE leads SET deleted_at = NOW() WHERE campaign_id = $1", [campaignId]);
+  async softDeleteByCampaign(campaignId: string, workspaceId: string): Promise<number> {
+    requireWs(workspaceId, "softDeleteByCampaign");
+    const r = await pool.query(
+      `UPDATE leads SET deleted_at = NOW()
+       WHERE campaign_id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+      [campaignId, workspaceId]
+    );
+    return r.rowCount ?? 0;
   },
 };

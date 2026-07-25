@@ -17,8 +17,8 @@ import { AuthenticatedRequest } from "../middleware/auth.middleware";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export class CampaignController {
-  public static async getCampaigns(_req: Request, res: Response): Promise<void> {
-    const data = await campaignRepository.list();
+  public static async getCampaigns(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const data = await campaignRepository.list(req.workspaceId!);
     res.json({ success: true, data });
   }
 
@@ -53,12 +53,12 @@ export class CampaignController {
 
   public static async updateCampaign(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const previous = await campaignRepository.findById(id);
+    const previous = await campaignRepository.findById(id, req.workspaceId);
     if (!previous) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-    const updated = await campaignRepository.update(id, req.body);
+    const updated = await campaignRepository.update(id, req.body, req.workspaceId);
     if (!updated) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
@@ -81,13 +81,13 @@ export class CampaignController {
 
   public static async deleteCampaign(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const campaign = await campaignRepository.findById(id);
+    const campaign = await campaignRepository.findById(id, req.workspaceId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-    await campaignRepository.softDelete(id);
-    await leadRepository.softDeleteByCampaign(id);
+    await campaignRepository.softDelete(id, req.workspaceId!);
+    await leadRepository.softDeleteByCampaign(id, req.workspaceId!);
     await logAudit(`Campaign '${campaign.name}' deleted`, "CAMPAIGN", {
       userId: req.user?.id,
       userEmail: req.user?.email,
@@ -97,30 +97,33 @@ export class CampaignController {
     res.json({ success: true, message: "Campaign and associated leads deleted." });
   }
 
-  public static async getCampaignLeads(req: Request, res: Response): Promise<void> {
+  public static async getCampaignLeads(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const data = await leadRepository.listByCampaign(id);
+    const camp = await campaignRepository.findById(id, req.workspaceId);
+    if (!camp) { res.status(404).json({ success: false, error: "Campaign not found." }); return; }
+    const data = await leadRepository.listByCampaign(id, req.workspaceId!);
     res.json({ success: true, data });
   }
 
-  public static async createCampaignLead(req: Request, res: Response): Promise<void> {
+  public static async createCampaignLead(req: AuthenticatedRequest, res: Response): Promise<void> {
     const campaignId = req.params.id;
     const { email, firstName, lastName, company, personalizedLine } = req.body;
     if (!EMAIL_REGEX.test(email || "")) {
       res.status(400).json({ success: false, error: "Invalid email format." });
       return;
     }
-    const campaign = await campaignRepository.findById(campaignId);
+    const campaign = await campaignRepository.findById(campaignId, req.workspaceId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-    const dupe = await leadRepository.findByEmailInCampaign(campaignId, email);
+    const dupe = await leadRepository.findByEmailInCampaign(campaignId, email, req.workspaceId!);
     if (dupe) {
       res.status(409).json({ success: false, error: "Lead with this email is already in this campaign." });
       return;
     }
     const lead = await leadRepository.create({
+      workspaceId: req.workspaceId!,
       campaignId,
       email,
       firstName,
@@ -132,14 +135,14 @@ export class CampaignController {
     res.status(201).json({ success: true, lead });
   }
 
-  public static async bulkCreateLeads(req: Request, res: Response): Promise<void> {
+  public static async bulkCreateLeads(req: AuthenticatedRequest, res: Response): Promise<void> {
     const campaignId = req.params.id;
     const { leads } = req.body;
     if (!Array.isArray(leads)) {
       res.status(400).json({ success: false, error: "Field 'leads' must be an array." });
       return;
     }
-    const campaign = await campaignRepository.findById(campaignId);
+    const campaign = await campaignRepository.findById(campaignId, req.workspaceId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
@@ -147,6 +150,7 @@ export class CampaignController {
     const valid = leads.filter((l) => l && EMAIL_REGEX.test(l.email || ""));
     const created = await leadRepository.bulkCreate(
       valid.map((l) => ({
+        workspaceId: req.workspaceId!,
         campaignId,
         email: l.email,
         firstName: l.firstName || "",
@@ -159,14 +163,14 @@ export class CampaignController {
     res.json({ success: true, count: created.length, leads: created });
   }
 
-  public static async uploadLeadsCsv(req: Request, res: Response): Promise<void> {
+  public static async uploadLeadsCsv(req: AuthenticatedRequest, res: Response): Promise<void> {
     const campaignId = req.params.id;
     const { csvText } = req.body;
     if (typeof csvText !== "string" || csvText.trim() === "") {
       res.status(400).json({ success: false, error: "CSV text is required." });
       return;
     }
-    const campaign = await campaignRepository.findById(campaignId);
+    const campaign = await campaignRepository.findById(campaignId, req.workspaceId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
@@ -194,9 +198,10 @@ export class CampaignController {
       const cells = lines[i].split(",").map((c: string) => c.replace(/"/g, "").trim());
       const email = cells[emailIdx];
       if (!email || !EMAIL_REGEX.test(email)) { invalidCount++; continue; }
-      const dupe = await leadRepository.findByEmailInCampaign(campaignId, email);
+      const dupe = await leadRepository.findByEmailInCampaign(campaignId, email, req.workspaceId!);
       if (dupe) { dupCount++; continue; }
       await leadRepository.create({
+        workspaceId: req.workspaceId!,
         campaignId,
         email,
         firstName: firstIdx !== -1 ? cells[firstIdx] : "",
@@ -230,15 +235,15 @@ export class CampaignController {
     }
   }
 
-  public static async bulkPersonalize(req: Request, res: Response): Promise<void> {
+  public static async bulkPersonalize(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
     const { customizationInstruction } = req.body;
-    const campaign = await campaignRepository.findById(id);
+    const campaign = await campaignRepository.findById(id, req.workspaceId);
     if (!campaign) {
       res.status(404).json({ success: false, error: "Campaign not found." });
       return;
     }
-    const batch = await leadRepository.listPendingWithoutPersonalization(id, 10);
+    const batch = await leadRepository.listPendingWithoutPersonalization(id, 10, req.workspaceId!);
     if (batch.length === 0) {
       res.json({ success: true, message: "No unpersonalized pending leads remaining.", count: 0 });
       return;
@@ -251,7 +256,7 @@ export class CampaignController {
       batch.map(async (lead) => {
         try {
           const line = await aiService.personalizeLine(lead, customizationInstruction || "");
-          await leadRepository.update(lead.id, { personalizedLine: line });
+          await leadRepository.update(lead.id, { personalizedLine: line }, req.workspaceId!);
           return { email: lead.email, line };
         } catch (err) {
           return { email: lead.email, line: "", error: (err as Error).message };

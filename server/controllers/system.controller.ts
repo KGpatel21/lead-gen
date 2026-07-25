@@ -271,9 +271,11 @@ export class SystemController {
 
     if (task === "lead-research" || task === "email-generation") {
       // Kick the next un-researched lead through Gemini enrichment.
-      const pendingCampaigns = (await campaignRepository.list()).filter((c) => c.status === CampaignStatus.RUNNING);
+      const workspaceId = (req as any).workspaceId as string | undefined;
+      if (!workspaceId) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
+      const pendingCampaigns = (await campaignRepository.list(workspaceId)).filter((c) => c.status === CampaignStatus.RUNNING);
       for (const c of pendingCampaigns) {
-        const batch = await leadRepository.listPendingNeedingResearch(c.id, 1);
+        const batch = await leadRepository.listPendingNeedingResearch(c.id, 1, workspaceId);
         if (batch.length > 0) {
           try {
             const lead = await aiService.enrichAndResearchLead(batch[0].id);
@@ -345,6 +347,7 @@ export class SystemController {
 
       const createdLeads = await leadRepository.bulkCreate(
         (result.prospects || []).map((p) => ({
+          workspaceId,
           campaignId: campaign.id,
           email: p.email || `hello@${(p.company || "prospect").toLowerCase().replace(/[^a-z0-9]/g, "")}.com`,
           firstName: p.firstName,
@@ -376,14 +379,16 @@ export class SystemController {
     }
   }
 
-  public static async verifyDiagnostics(_req: Request, res: Response): Promise<void> {
+  public static async verifyDiagnostics(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const ws = (req as any).workspaceId as string | undefined;
+    if (!ws) { res.status(500).json({ success: false, error: "workspace context missing" }); return; }
     const [campaignCount, queueStats, activeSmtps, activeDomains, replies, leads] = await Promise.all([
-      campaignRepository.list().then((r) => r.length),
+      campaignRepository.list(ws).then((r) => r.length),
       queueRepository.stats(),
-      smtpRepository.list().then((r) => r.length),
-      domainRepository.list().then((r) => r.length),
-      replyRepository.list().then((r) => r.length),
-      leadRepository.list().then((r) => r.length),
+      smtpRepository.list(ws).then((r) => r.length),
+      domainRepository.list(ws).then((r) => r.length),
+      replyRepository.list(ws).then((r) => r.length),
+      leadRepository.list(ws).then((r) => r.length),
     ]);
     res.json({
       success: true,
